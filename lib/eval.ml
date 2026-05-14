@@ -11,7 +11,73 @@ let create_env () : env =
   ) (Unix.environment ());
   t
 
-let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"; "hsearch"; "alias"; "unalias"; "source"; "."]
+let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"; "hsearch"; "alias"; "unalias"; "source"; "."; "jobs"; "fg"; "bg"]
+
+(* ===== Job control ===================================================== *)
+
+type job_state = Running | Stopped | Done
+
+type job = {
+  id      : int;       (* job number, 1-based *)
+  pid     : int;       (* PID del proceso (o grupo) *)
+  cmdline : string;
+  mutable state : job_state;
+}
+
+let jobs : job list ref = ref []
+let next_job_id = ref 1
+
+(* PID del proceso foreground actual (0 = ninguno). Lo usa el handler de
+   SIGINT para reenviar la señal si fuera necesario (en TTY normalmente
+   el kernel ya la entrega al grupo foreground). *)
+let current_fg_pid : int ref = ref 0
+
+let add_job ~pid ~cmdline ~state =
+  let id = !next_job_id in
+  incr next_job_id;
+  jobs := !jobs @ [{ id; pid; cmdline; state }];
+  id
+
+let remove_job id =
+  jobs := List.filter (fun j -> j.id <> id) !jobs
+
+let find_job id = List.find_opt (fun j -> j.id = id) !jobs
+
+let state_label = function
+  | Running -> "Running"
+  | Stopped -> "Stopped"
+  | Done    -> "Done"
+
+(* Sondea sin bloquear todos los jobs y actualiza su estado. *)
+let reap_jobs () =
+  List.iter (fun j ->
+    if j.state <> Done then
+      try
+        let (pid, status) = Unix.waitpid [Unix.WNOHANG; Unix.WUNTRACED] j.pid in
+        if pid = 0 then () (* sin cambios *)
+        else match status with
+          | Unix.WEXITED _ | Unix.WSIGNALED _ -> j.state <- Done
+          | Unix.WSTOPPED _ -> j.state <- Stopped
+      with Unix.Unix_error _ -> j.state <- Done
+  ) !jobs
+
+(* Limpia los jobs que terminaron (tras reportarlos al usuario). *)
+let purge_done_jobs () =
+  jobs := List.filter (fun j -> j.state <> Done) !jobs
+
+(* Render simple de un statement a string para mostrar en `jobs`. *)
+let rec render_pipeline = function
+  | Ast.Single { Ast.argv; _ } -> String.concat " " argv
+  | Ast.Pipe (a, b) -> render_pipeline a ^ " | " ^ render_pipeline b
+
+let rec render_statement = function
+  | Ast.Empty       -> ""
+  | Ast.Assign (k, v) -> k ^ "=" ^ v
+  | Ast.Exec p      -> render_pipeline p
+  | Ast.And (a, b)  -> render_statement a ^ " && " ^ render_statement b
+  | Ast.Or  (a, b)  -> render_statement a ^ " || " ^ render_statement b
+  | Ast.Seq (a, b)  -> render_statement a ^ "; "  ^ render_statement b
+  | Ast.Background s -> render_statement s ^ " &"
 
 (* Tabla de aliases mutables. expand_alias se aplica al primer token. *)
 let aliases : (string, string) Hashtbl.t = Hashtbl.create 32
@@ -162,6 +228,60 @@ let run_builtin env argv =
         Lwt.return code
       end
   (* time se maneja en main.ml para envolver el pipeline completo *)
+  | "jobs" :: _ ->
+      reap_jobs ();
+      List.iter (fun j ->
+        Printf.printf "[%d] %d %s  %s\n" j.id j.pid (state_label j.state) j.cmdline
+      ) !jobs;
+      purge_done_jobs ();
+      Lwt.return 0
+  | ("fg" | "bg") as op :: rest ->
+      reap_jobs ();
+      let parse_id s =
+        let s = if String.length s > 0 && s.[0] = '%'
+                then String.sub s 1 (String.length s - 1) else s in
+        int_of_string_opt s
+      in
+      let target =
+        match rest with
+        | [] ->
+            (* default: el job más reciente que no esté Done *)
+            (match List.rev (List.filter (fun j -> j.state <> Done) !jobs) with
+             | j :: _ -> Some j | [] -> None)
+        | id_s :: _ ->
+            (match parse_id id_s with
+             | Some id -> find_job id
+             | None    -> None)
+      in
+      (match target with
+       | None ->
+           Printf.eprintf "ocash: %s: no such job\n%!" op;
+           Lwt.return 1
+       | Some j ->
+           (try Unix.kill j.pid Sys.sigcont with Unix.Unix_error _ -> ());
+           j.state <- Running;
+           if op = "bg" then begin
+             Printf.printf "[%d] %d %s &\n" j.id j.pid j.cmdline;
+             Lwt.return 0
+           end else begin
+             (* fg: esperar a que termine o se pare *)
+             Printf.printf "%s\n%!" j.cmdline;
+             current_fg_pid := j.pid;
+             let code =
+               try
+                 let (_, status) = Unix.waitpid [Unix.WUNTRACED] j.pid in
+                 current_fg_pid := 0;
+                 match status with
+                 | Unix.WEXITED n -> j.state <- Done; n
+                 | Unix.WSIGNALED _ -> j.state <- Done; 130
+                 | Unix.WSTOPPED _ -> j.state <- Stopped; 128
+               with Unix.Unix_error _ ->
+                 current_fg_pid := 0; j.state <- Done; 1
+             in
+             if j.state = Done then remove_job j.id;
+             last_exit_code := code;
+             Lwt.return code
+           end)
   | "hsearch" :: rest ->
       let q = String.concat " " rest in
       let matches = History.fuzzy_search ~limit:20 q in
@@ -387,7 +507,50 @@ and eval_statement_internal env stmt =
       let* _ = eval_statement_internal env a in
       eval_statement_internal env b
   | Ast.Background stmt ->
-      Lwt.async (fun () ->
-        let* _ = eval_statement_internal env stmt in
-        Lwt.return ());
-      Lwt.return 0
+      let cmdline = render_statement stmt in
+      (* Intento de fast-path: Exec (Single cmd) con programa externo →
+         create_process sin esperar. Para los demás casos forkeamos un
+         proceso que evalúa el statement de forma síncrona y exit. *)
+      let pid_opt =
+        match stmt with
+        | Ast.Exec (Ast.Single cmd) ->
+            let argv = List.map (expand_vars env) cmd.Ast.argv in
+            let argv = expand_alias argv in
+            (match argv with
+             | [] -> None
+             | prog :: _ when List.mem prog builtins -> None
+             | prog :: _ ->
+                 (match find_in_path prog with
+                  | None ->
+                      Printf.eprintf "ocash: %s: comando no encontrado\n%!" prog;
+                      None
+                  | Some full_path ->
+                      let (i, o, e, opened) =
+                        resolve_redirects cmd.Ast.redirects
+                          (Unix.stdin, Unix.stdout, Unix.stderr)
+                      in
+                      let pid = Unix.create_process full_path
+                        (Array.of_list argv) i o e in
+                      List.iter (fun fd -> try Unix.close fd with _ -> ()) opened;
+                      Some pid))
+        | _ -> None
+      in
+      (match pid_opt with
+       | Some pid ->
+           let id = add_job ~pid ~cmdline ~state:Running in
+           Printf.printf "[%d] %d\n%!" id pid;
+           Lwt.return 0
+       | None ->
+           (* Fork genérico: el child ejecuta el statement y exit *)
+           (match Unix.fork () with
+            | 0 ->
+                let promise = eval_statement_internal env stmt in
+                let code = match Lwt.state promise with
+                  | Lwt.Return n -> n
+                  | _ -> 0
+                in
+                exit code
+            | pid ->
+                let id = add_job ~pid ~cmdline ~state:Running in
+                Printf.printf "[%d] %d\n%!" id pid;
+                Lwt.return 0))

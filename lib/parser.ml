@@ -69,7 +69,13 @@ let statement =
     (pipeline >>| fun p -> Ast.Exec p)
   ) <* spaces
 
+(* Statement con trailing `&` opcional → Background. *)
+let statement_with_bg =
+  let+ s   = statement
+  and+ bg  = option false (spaces *> char '&' *> spaces *> return true) in
+  if bg then Ast.Background s else s
+
 let parse input =
   let s = String.trim input in
   if s = "" then Ok Ast.Empty
-  else parse_string ~consume:All statement s
+  else parse_string ~consume:All statement_with_bg s

@@ -44,9 +44,7 @@ let needs_bash input =
   (* Sequence operators no soportados en parser actual *)
   contains_substr "&&" || contains_substr "||" ||
   contains_substr ";" ||
-  (* Background *)
-  contains_substr " &" || (let s' = String.trim s in
-                           String.length s' > 0 && s'.[String.length s' - 1] = '&') ||
+  (* Background `&` se maneja en el parser nativo, no en bash. *)
   (* Heredoc *)
   contains_substr "<<" ||
   (* Tests *)

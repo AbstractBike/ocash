@@ -2,6 +2,25 @@ open Lwt.Syntax
 
 let () = Lwt_engine.set (new Lwt_engine.libev ())
 
+(* Signal handling: el padre intercepta SIGINT con un handler que no hace
+   nada relevante. Si hay un proceso foreground corriendo, ese también
+   recibe la señal del TTY y muere; ocash sigue vivo. Si no hay proceso
+   foreground, simplemente ignoramos (lambda-term redibuja la prompt).
+   Importante: usar Signal_handle (no Signal_ignore) porque SIG_IGN se
+   hereda a través de execve, mientras que los handlers se resetean a
+   default — así los children sí responden a Ctrl-C normalmente. *)
+let () =
+  Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ ->
+    (* nada: en el padre absorbemos. El child foreground muere por su
+       propio default handler y waitpid retorna con WSIGNALED. *)
+    ()
+  ));
+  (* SIGQUIT también — Ctrl-\ no debería matar ocash. *)
+  Sys.set_signal Sys.sigquit (Sys.Signal_handle (fun _ -> ()));
+  (* SIGTSTP en el padre: no detener ocash. Children pueden ser detenidos
+     individualmente vía kill -STOP. *)
+  Sys.set_signal Sys.sigtstp (Sys.Signal_handle (fun _ -> ()))
+
 (* Historial persistente (Ocash_lib.History) reemplaza el Queue local. *)
 let add_history line = Ocash_lib.History.add line
 

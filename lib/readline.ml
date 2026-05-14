@@ -1,19 +1,27 @@
 open Lwt.Syntax
 
 let nl_prefixes = ["habla:"; "ai:"; "?:"; "haz:"; "make:"; "di:"]
+let ocaml_prefixes = ["ml:"; "ocaml:"]
 
-let is_nl input =
-  List.exists (fun p -> String.starts_with ~prefix:p (String.trim input)) nl_prefixes
-
-let strip_nl_prefix input =
+let strip_prefix prefixes input =
   let s = String.trim input in
   List.find_map (fun p ->
     if String.starts_with ~prefix:p s then
       Some (String.sub s (String.length p)
               (String.length s - String.length p) |> String.trim)
     else None
-  ) nl_prefixes
-  |> Option.value ~default:s
+  ) prefixes
+
+let is_nl input = strip_prefix nl_prefixes input <> None
+let is_ocaml input = strip_prefix ocaml_prefixes input <> None
+
+let strip_nl_prefix input =
+  strip_prefix nl_prefixes input
+  |> Option.value ~default:(String.trim input)
+
+let strip_ocaml_prefix input =
+  strip_prefix ocaml_prefixes input
+  |> Option.value ~default:(String.trim input)
 
 let c_reset  = "\027[0m"
 let c_green  = "\027[32m"

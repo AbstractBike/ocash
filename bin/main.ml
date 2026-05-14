@@ -68,15 +68,19 @@ let banner () =
      \  %s║   ocash — OCaml Shell     ║%s\n\
      \  %s║   + Qwen2.5-OCamler AI    ║%s\n\
      \  %s║   + Ansible builtin       ║%s\n\
+     \  %s║   + OCaml toploop (ml:)   ║%s\n\
      \  %s╚═══════════════════════════╝%s\n\
      \  %shabla: <texto>%s  → modo AI en español\n\
-     \  %s?:     <texto>%s  → alias de habla:\n\
-     \  %sansible help%s    → ayuda del builtin Ansible\n\n"
+     \  %sml:    <expr>%s   → evalúa OCaml en el toploop embebido\n\
+     \  %sansible help%s    → ayuda del builtin Ansible\n\
+     \  %socaml help%s      → ayuda del compilador OCaml\n\n"
     c_cyan c_reset
     c_cyan c_reset
     c_cyan c_reset
     c_cyan c_reset
     c_cyan c_reset
+    c_cyan c_reset
+    c_bold c_reset
     c_bold c_reset
     c_bold c_reset
     c_bold c_reset
@@ -93,8 +97,13 @@ let () =
       | Some ""    -> loop ()
       | Some line  ->
           let* () =
-            if Ocash_lib.Readline.is_nl line
-            then handle_nl env line
+            if Ocash_lib.Readline.is_nl line then
+              handle_nl env line
+            else if Ocash_lib.Readline.is_ocaml line then begin
+              let code = Ocash_lib.Readline.strip_ocaml_prefix line in
+              let _ = Ocash_lib.Ocaml_eval.eval_phrase code in
+              Lwt.return ()
+            end
             else
               let* _ = eval_line env line in
               Lwt.return ()

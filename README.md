@@ -56,6 +56,30 @@ habla: ejecutar playbook site.yml en hosts de produccion
 > ansible playbook site.yml --limit prod
 ```
 
+## OCaml embebido
+
+`ocash` lleva el compilador OCaml dentro (`compiler-libs.toplevel`).
+Evalúa expresiones in-process sin invocar `ocaml`:
+
+```
+user [AI] ~/proyecto $ ml: List.map succ [1;2;3]
+- : int list = [2; 3; 4]
+
+user [AI] ~/proyecto $ ml: let cube x = x * x * x ;; cube 5
+val cube : int -> int = <fun>
+- : int = 125
+```
+
+Builtin `ocaml` para compilar archivos:
+
+```
+ocaml eval "Printf.printf %d (1+1)"
+ocaml use foo.ml                       # equivalente a #use
+ocaml compile foo.ml                   # bytecode .cmo (in-process)
+ocaml build foo.ml -p lwt,cohttp -o app   # binario nativo vía ocamlfind
+ocaml help
+```
+
 ## Fatbin (binario único distribuible)
 
 ```bash
@@ -71,6 +95,12 @@ tar czf ocash-fatbin.tar.gz -C dist .
 
 El script intenta linkar estáticamente (`dune build --profile static`).
 Si falta `libev.a` u otra estática, cae a build dinámico normal.
+
+**Nota sobre el toploop OCaml embebido + link estático**: el toploop
+usa `Dynlink` para evaluar definiciones de valor. Con `-static` esto
+puede fallar (glibc no permite `dlopen` en binarios estáticos). En
+ese caso `ml:` solo parsea y type-checkea; ejecución requiere build
+dinámico o musl + `-dynlink`.
 
 Para link 100% estático: usa un switch opam con musl + flambda
 (`opam switch create musl 4.14.1+musl+static`) y `apt install libev-dev`.
@@ -90,6 +120,7 @@ lib/ast.ml          AST de la shell
 lib/parser.ml       Parser Angstrom (pipes, redirects, assigns)
 lib/eval.ml         Evaluador Lwt (fork/exec, redirects, builtins)
 lib/ansible.ml      Wrapper Ansible CLI
+lib/ocaml_eval.ml   Toploop OCaml embebido + compile/build
 lib/ai.ml           Cliente HTTP llama-server
 lib/completion.ml   Completion de paths y comandos
 lib/readline.ml     UI lambda-term + prompt + parsing NL

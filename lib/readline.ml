@@ -79,50 +79,78 @@ let build_prompt () =
     c_dim count c_reset
     c_bold
 
-class shell_readline ?(history_ctx=[]) term completions prompt_str = object(self)
-  inherit LTerm_read_line.read_line ()
-  inherit [Zed_string.t] LTerm_read_line.term term
+(* Ghost-text inline: sugerencia AI mostrada en gris detrás del cursor,
+   actualizada en cada cambio de input. Tab inserta la sugerencia. *)
+class shell_readline ?(history_ctx=[]) term completions prompt_str =
+  let suggestion = ref "" in
+  let last_query_text = ref "" in
+  object(self)
+    inherit LTerm_read_line.read_line () as super
+    inherit [Zed_string.t] LTerm_read_line.term term
 
-  initializer
-    self#set_prompt (React.S.const (LTerm_text.of_utf8 prompt_str))
+    initializer
+      self#set_prompt (React.S.const (LTerm_text.of_utf8 prompt_str));
+      (* Cada vez que cambia el texto, dispara una query AI (debounced
+         por el cache de Autocomplete). Cuando llega la sugerencia, la
+         guardamos en ref. El siguiente redraw la incluirá en #stylise. *)
+      if Autocomplete.enabled () then begin
+        let _evt = React.E.map (fun _change ->
+          let s = Zed_string.to_utf8 (Zed_rope.to_string (Zed_edit.text self#edit)) in
+          if String.length s >= 2 && s <> !last_query_text then begin
+            last_query_text := s;
+            Lwt.async (fun () ->
+              let open Lwt.Syntax in
+              let* sugg = Autocomplete.suggest ~history:history_ctx ~current:s in
+              (match sugg with
+               | Some s' when s' <> "" -> suggestion := s'
+               | _ -> suggestion := "");
+              Lwt.return ())
+          end;
+          if String.length s = 0 then suggestion := ""
+        ) (Zed_edit.changes self#edit) in
+        ignore _evt
+      end
 
-  method! show_box = false
+    method! show_box = false
 
-  method! completion =
-    let full_input =
-      Zed_rope.to_string (Zed_edit.text self#edit) |> Zed_string.to_utf8
-    in
-    let last_word =
-      full_input
-      |> String.split_on_char ' '
-      |> List.rev
-      |> (function [] -> "" | h :: _ -> h)
-    in
-    (* 1. Completion local inmediato (path, builtins) *)
-    let local =
-      List.filter (String.starts_with ~prefix:last_word) completions
-      |> List.map (fun s ->
-          (Zed_string.of_utf8 s, Zed_string.of_utf8 ""))
-    in
-    self#set_completion (String.length full_input - String.length last_word) local;
+    (* Añade el sufijo ghost en gris al texto stylise-ado. Solo cuando
+       no estamos en modo "return" (final del input). *)
+    method! stylise last =
+      let (styled, cursor) = super#stylise last in
+      if last || !suggestion = "" then (styled, cursor)
+      else begin
+        let dim = LTerm_style.{ none with foreground = Some lblack } in
+        let ghost_arr = LTerm_text.of_utf8 !suggestion in
+        let ghost_dim = Array.map (fun (c, _) -> (c, dim)) ghost_arr in
+        (Array.append styled ghost_dim, cursor)
+      end
 
-    (* 2. Si autocomplete AI está habilitado y el input es razonable,
-       dispara una query async; cuando llegue, añade la sugerencia
-       AI a las completions ya mostradas. *)
-    if Autocomplete.enabled () && String.length full_input >= 2 then
-      Lwt.async (fun () ->
-        let open Lwt.Syntax in
-        let* sugg = Autocomplete.suggest ~history:history_ctx ~current:full_input in
-        (match sugg with
-         | Some s ->
-             let ai_entry =
-               (Zed_string.of_utf8 (full_input ^ s),
-                Zed_string.of_utf8 " [AI]")
-             in
-             self#set_completion 0 (local @ [ai_entry])
-         | None -> ());
-        Lwt.return ())
-end
+    (* Tab inserta la sugerencia si hay una; si no, hace completion
+       normal (paths, builtins). *)
+    method! complete =
+      if !suggestion <> "" then begin
+        let sugg = !suggestion in
+        suggestion := "";
+        let zs = Zed_rope.of_string (Zed_string.of_utf8 sugg) in
+        Zed_edit.insert self#context zs
+      end else begin
+        let full_input =
+          Zed_rope.to_string (Zed_edit.text self#edit) |> Zed_string.to_utf8
+        in
+        let last_word =
+          full_input
+          |> String.split_on_char ' '
+          |> List.rev
+          |> (function [] -> "" | h :: _ -> h)
+        in
+        let local =
+          List.filter (String.starts_with ~prefix:last_word) completions
+          |> List.map (fun s ->
+              (Zed_string.of_utf8 s, Zed_string.of_utf8 ""))
+        in
+        self#set_completion (String.length full_input - String.length last_word) local
+      end
+  end
 
 (* REPL "tonto" para modo no-TTY (scripts, pipes, CI). *)
 let read_input_dumb ~with_prompt () =

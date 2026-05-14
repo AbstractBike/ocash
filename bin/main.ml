@@ -36,12 +36,26 @@ let eval_line env line =
             Printf.eprintf "\027[31merror:\027[0m %s\n%!" (Printexc.to_string exn);
             Lwt.return 1)
 
-let handle_nl env input =
+let last_history_entries n =
+  let lst = ref [] in
+  Queue.iter (fun s -> lst := s :: !lst) history;
+  let recent = List.rev !lst in
+  let len = List.length recent in
+  if len <= n then recent
+  else List.filteri (fun i _ -> i >= len - n) recent
+
+let handle_nl ?(with_history=false) env input =
   let open Ocash_lib in
-  let query = Readline.strip_nl_prefix input in
-  Printf.printf "%s⟳ pensando...%s\r%!"
-    Readline.c_yellow Readline.c_reset;
-  let* result = Ai.query ~user_input:query in
+  let query =
+    if with_history then Readline.strip_history_trigger input
+    else Readline.strip_nl_prefix input
+  in
+  let history_ctx = if with_history then last_history_entries 8 else [] in
+  Printf.printf "%s⟳ pensando%s%s...%s\r%!"
+    Readline.c_yellow
+    (if with_history then " (con contexto)" else "")
+    "" Readline.c_reset;
+  let* result = Ai.query ~history:history_ctx ~user_input:query () in
   print_string "                    \r";
   match result with
   | Ai.Disabled ->
@@ -77,14 +91,16 @@ let banner () =
   Printf.printf
     "\n  %s╔═══════════════════════════╗%s\n\
      \  %s║   ocash — OCaml Shell     ║%s\n\
-     \  %s║   + Qwen2.5-OCamler AI    ║%s\n\
+     \  %s║   + AI (multi-backend)    ║%s\n\
      \  %s║   + Ansible builtin       ║%s\n\
      \  %s║   + OCaml toploop (ml:)   ║%s\n\
      \  %s╚═══════════════════════════╝%s\n\
-     \  %shabla: <texto>%s  → modo AI en español\n\
-     \  %sml:    <expr>%s   → evalúa OCaml en el toploop embebido\n\
-     \  %sansible help%s    → ayuda del builtin Ansible\n\
-     \  %socaml help%s      → ayuda del compilador OCaml\n\n"
+     \  %shabla: <texto>%s    → modo AI en español\n\
+     \  %s<texto> ç%s          → AI con contexto del historial\n\
+     \  %sml:    <expr>%s     → evalúa OCaml en el toploop embebido\n\
+     \  %sansible help%s      → ayuda del builtin Ansible\n\
+     \  %socaml help%s        → ayuda del compilador OCaml\n\
+     \  %sGPU:%s %s — %s\n\n"
     c_cyan c_reset
     c_cyan c_reset
     c_cyan c_reset
@@ -95,6 +111,12 @@ let banner () =
     c_bold c_reset
     c_bold c_reset
     c_bold c_reset
+    c_bold c_reset
+    c_dim c_reset
+    (Ocash_lib.Gpu.label ())
+    (if Lazy.force Ocash_lib.Gpu.has_gpu
+     then "autocomplete on-the-fly habilitado"
+     else "autocomplete on-the-fly deshabilitado")
 
 let () =
   let interactive = Lazy.force Ocash_lib.Readline.is_tty in
@@ -111,7 +133,9 @@ let () =
       | Some ""    -> loop ()
       | Some line  ->
           let* () =
-            if Ocash_lib.Readline.is_nl line then
+            if Ocash_lib.Readline.is_history_ai line then
+              handle_nl ~with_history:true env line
+            else if Ocash_lib.Readline.is_nl line then
               handle_nl env line
             else if Ocash_lib.Readline.is_ocaml line then begin
               let code = Ocash_lib.Readline.strip_ocaml_prefix line in

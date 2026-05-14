@@ -3,6 +3,25 @@ open Lwt.Syntax
 let nl_prefixes = ["habla:"; "ai:"; "?:"; "haz:"; "make:"; "di:"]
 let ocaml_prefixes = ["ml:"; "ocaml:"]
 
+(* Sufijo `ç` (o ` ç`) al final del input → modo AI con historial como contexto. *)
+let history_trigger_suffixes = ["ç"; " ç"]
+
+let is_history_ai input =
+  let s = String.trim input in
+  List.exists (fun suf ->
+    String.length s >= String.length suf &&
+    String.sub s (String.length s - String.length suf) (String.length suf) = suf
+  ) history_trigger_suffixes
+
+let strip_history_trigger input =
+  let s = String.trim input in
+  List.fold_left (fun acc suf ->
+    if String.length acc >= String.length suf &&
+       String.sub acc (String.length acc - String.length suf) (String.length suf) = suf
+    then String.trim (String.sub acc 0 (String.length acc - String.length suf))
+    else acc
+  ) s history_trigger_suffixes
+
 let strip_prefix prefixes input =
   let s = String.trim input in
   List.find_map (fun p ->
@@ -44,14 +63,20 @@ let build_prompt () =
               (String.length full - String.length home)
     else full
   in
+  let count =
+    try
+      let entries = Sys.readdir "." in
+      Array.length entries
+    with _ -> 0
+  in
   let ai_badge =
     if !Ai.ai_enabled then color c_cyan " [AI]" else ""
   in
-  Printf.sprintf "%s%s %s%s%s $ "
+  Printf.sprintf "%s%s %s %s{%d}%s%s $ "
     (color c_green user)
     ai_badge
     (color c_blue cwd)
-    c_reset
+    c_dim count c_reset
     c_bold
 
 class shell_readline term completions prompt_str = object(self)

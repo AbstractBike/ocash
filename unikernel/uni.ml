@@ -102,6 +102,122 @@ ocash_uni_last_query_ms %.2f
 end
 
 (* ============================================================ *)
+(* Sandbox AST: whitelist de módulos permitidos en handlers      *)
+(* ============================================================ *)
+
+module Sandbox = struct
+  (* Módulos cuyas APIs el handler puede llamar libremente.
+     Uni también está permitido porque es necesario para register. *)
+  let allowed_modules = [
+    "String"; "List"; "Printf"; "Filename"; "Int";
+    "Option"; "Char"; "Bool";  (* utilitarios puros *)
+    "Uni";                      (* API de registro *)
+  ]
+
+  (* Identificadores/módulos prohibidos explícitamente. Cualquier referencia
+     a una de estas entradas (sea como prefijo de un Longident.Ldot o como
+     Lident directo) hace fallar la validación. *)
+  let banned_modules = [
+    "Sys"; "Unix"; "Stdlib"; "Pervasives";
+    "Toploop"; "Dynlink"; "Topdirs"; "Compmisc";
+    "Mutex"; "Thread"; "Domain";
+    "Marshal"; "Obj";
+    "Scanf";                    (* lectura de stdin *)
+  ]
+
+  let banned_idents = [
+    (* funciones de Stdlib que abren mundo exterior, accesibles
+       sin prefijo gracias al pervasives abierto *)
+    "open_in"; "open_in_bin"; "open_in_gen";
+    "open_out"; "open_out_bin"; "open_out_gen";
+    "exit"; "at_exit";
+    "read_line"; "read_int"; "read_float";
+    (* metaprogramación peligrosa *)
+    "ignore"; (* permitido en realidad — quitamos *)
+  ]
+  (* Nota: dejamos `ignore` quitado de la lista efectiva: *)
+  let banned_idents = List.filter (fun x -> x <> "ignore") banned_idents
+
+  let rec lident_head = function
+    | Longident.Lident s -> s
+    | Longident.Ldot (l, _) -> lident_head l
+    | Longident.Lapply (l, _) -> lident_head l
+
+  let rec lident_tail = function
+    | Longident.Lident s -> s
+    | Longident.Ldot (_, s) -> s
+    | Longident.Lapply (l, _) -> lident_tail l
+
+  exception Forbidden of string
+
+  let check_lident lid =
+    let head = lident_head lid in
+    let tail = lident_tail lid in
+    (* Si el head es un módulo conocido, debe estar en la whitelist *)
+    if List.mem head banned_modules then
+      raise (Forbidden (Printf.sprintf "uso de módulo prohibido %S" head));
+    (* Si parece nombre de módulo (mayúscula inicial) y no está en whitelist,
+       lo rechazamos también: cerrojo por defecto. *)
+    if String.length head > 0
+       && head.[0] >= 'A' && head.[0] <= 'Z'
+       && not (List.mem head allowed_modules)
+    then
+      raise (Forbidden (Printf.sprintf "módulo no whitelisted: %S" head));
+    if List.mem tail banned_idents then
+      raise (Forbidden (Printf.sprintf "identificador prohibido %S" tail))
+
+  let iterator =
+    let open Ast_iterator in
+    let default = default_iterator in
+    { default with
+      expr = (fun self e ->
+        (match e.Parsetree.pexp_desc with
+         | Pexp_ident { txt; _ }
+         | Pexp_construct ({ txt; _ }, _)
+         | Pexp_new { txt; _ } -> check_lident txt
+         | _ -> ());
+        default.expr self e);
+      typ = (fun self t ->
+        (match t.Parsetree.ptyp_desc with
+         | Ptyp_constr ({ txt; _ }, _)
+         | Ptyp_class ({ txt; _ }, _) -> check_lident txt
+         | _ -> ());
+        default.typ self t);
+      pat = (fun self p ->
+        (match p.Parsetree.ppat_desc with
+         | Ppat_construct ({ txt; _ }, _)
+         | Ppat_type { txt; _ } -> check_lident txt
+         | _ -> ());
+        default.pat self p);
+      module_expr = (fun self me ->
+        (match me.Parsetree.pmod_desc with
+         | Pmod_ident { txt; _ } -> check_lident txt
+         | _ -> ());
+        default.module_expr self me);
+      open_declaration = (fun self od ->
+        (match od.Parsetree.popen_expr.Parsetree.pmod_desc with
+         | Pmod_ident { txt; _ } ->
+             (* prohibir `open Unix`, `open Sys`, ... *)
+             check_lident txt
+         | _ -> ());
+        default.open_declaration self od);
+      extension = (fun _self _ext ->
+        raise (Forbidden "extensiones/PPX no permitidas"));
+    }
+
+  (* Valida un structure entero. Retorna Ok () | Error msg. *)
+  let validate_structure s =
+    try iterator.structure iterator s; Ok ()
+    with Forbidden msg -> Error msg
+
+  (* Valida una phrase del Toploop. Las directivas (`#use`, `#load`)
+     son rechazadas siempre. *)
+  let validate_phrase = function
+    | Parsetree.Ptop_def s -> validate_structure s
+    | Parsetree.Ptop_dir _ -> Error "directivas toploop (#...) no permitidas"
+end
+
+(* ============================================================ *)
 (* Toploop helper                                                *)
 (* ============================================================ *)
 
@@ -141,6 +257,14 @@ let toploop_init () =
     toploop_inited := true
   end
 
+(* Resultado de la evaluación de un fragmento. Permite distinguir
+   parse-error / banned / exec-failure / OK. *)
+type eval_result =
+  | Eval_ok
+  | Eval_banned of string
+  | Eval_parse_error of string
+  | Eval_exec_failure
+
 let eval_ocaml code =
   toploop_init ();
   let code =
@@ -148,16 +272,29 @@ let eval_ocaml code =
        && String.sub code (String.length code - 2) 2 = ";;"
     then code else code ^ ";;"
   in
-  try
-    let lexbuf = Lexing.from_string code in
-    Location.init lexbuf "//uni//";
-    let phrase = !Toploop.parse_toplevel_phrase lexbuf in
-    let ok = Toploop.execute_phrase true Format.std_formatter phrase in
-    Format.pp_print_flush Format.std_formatter ();
-    ok
-  with exn ->
-    Location.report_exception Format.err_formatter exn;
-    false
+  match
+    try
+      let lexbuf = Lexing.from_string code in
+      Location.init lexbuf "//uni//";
+      Ok (!Toploop.parse_toplevel_phrase lexbuf)
+    with exn ->
+      Location.report_exception Format.err_formatter exn;
+      Error (Printexc.to_string exn)
+  with
+  | Error e -> Eval_parse_error e
+  | Ok phrase ->
+      match Sandbox.validate_phrase phrase with
+      | Error msg ->
+          Printf.eprintf "[uni] sandbox BLOQUEÓ handler: %s\n%!" msg;
+          Eval_banned msg
+      | Ok () ->
+          try
+            let ok = Toploop.execute_phrase true Format.std_formatter phrase in
+            Format.pp_print_flush Format.std_formatter ();
+            if ok then Eval_ok else Eval_exec_failure
+          with exn ->
+            Location.report_exception Format.err_formatter exn;
+            Eval_exec_failure
 
 (* ============================================================ *)
 (* Persistencia                                                  *)
@@ -207,7 +344,12 @@ let load_persisted_handlers () =
         let len = in_channel_length ic in
         let code = really_input_string ic len in
         close_in ic;
-        ignore (eval_ocaml code)
+        match eval_ocaml code with
+        | Eval_ok -> ()
+        | Eval_banned msg ->
+            Printf.eprintf "[uni] handler persistido %s rechazado por sandbox: %s\n%!" f msg
+        | Eval_parse_error _ | Eval_exec_failure ->
+            Printf.eprintf "[uni] handler persistido %s no recompila\n%!" f
       end
     ) files
 
@@ -330,21 +472,32 @@ let process_query query =
           let path = save_handler_source id code in
           Printf.printf "[uni] persistido en %s\n%!" path;
           let before = Handlers.count () in
-          let ok = eval_ocaml code in
+          let res = eval_ocaml code in
           let after = Handlers.count () in
-          if not ok || after = before then begin
-            (try Sys.remove path with _ -> ());
-            incr Metrics.compile_errors;
-            finish (Lwt.return_error "compilación del handler generado falló o no registró")
-          end else begin
-            incr Metrics.handlers_compiled;
-            match Handlers.dispatch query with
-            | Some cmd ->
-                Printf.printf "[uni] NUEVO handler aplicado: %s → %s\n%!" query cmd;
-                finish (Lwt.return_ok cmd)
-            | None ->
-                finish (Lwt.return_error "handler compilado pero no encaja con la query")
-          end
+          (match res with
+           | Eval_banned msg ->
+               (* Sandbox bloqueó: renombrar a .banned y NO ejecutar. *)
+               let banned_path = path ^ ".banned" in
+               (try Sys.rename path banned_path with _ -> ());
+               incr Metrics.compile_errors;
+               Printf.eprintf "[uni] handler rechazado por sandbox, guardado en %s\n%!" banned_path;
+               finish (Lwt.return_error ("sandbox bloqueó handler: " ^ msg))
+           | Eval_parse_error _ | Eval_exec_failure ->
+               (try Sys.remove path with _ -> ());
+               incr Metrics.compile_errors;
+               finish (Lwt.return_error "compilación del handler generado falló")
+           | Eval_ok when after = before ->
+               (try Sys.remove path with _ -> ());
+               incr Metrics.compile_errors;
+               finish (Lwt.return_error "handler compiló pero no llamó a Uni.register")
+           | Eval_ok ->
+               incr Metrics.handlers_compiled;
+               match Handlers.dispatch query with
+               | Some cmd ->
+                   Printf.printf "[uni] NUEVO handler aplicado: %s → %s\n%!" query cmd;
+                   finish (Lwt.return_ok cmd)
+               | None ->
+                   finish (Lwt.return_error "handler compilado pero no encaja con la query"))
 
 (* ============================================================ *)
 (* HTTP server (compat OpenAI /v1/chat/completions)              *)

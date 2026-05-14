@@ -40,32 +40,42 @@ let build_completion_query ~history ~current =
 let cache : (string, string) Hashtbl.t = Hashtbl.create 256
 
 let suggest ~history ~current =
-  if not (enabled ()) || String.length current < 2 then
-    Lwt.return None
-  else begin
-    let key = String.concat "|" history ^ "::" ^ current in
-    match Hashtbl.find_opt cache key with
-    | Some s -> Lwt.return (Some s)
+  if String.length current < 1 then Lwt.return None
+  else
+    (* Fish-style: primero busca en historial (instantáneo, offline).
+       Solo si NO hay match en historial, y AI está habilitada,
+       cae al LLM. *)
+    match History.find_prefix current with
+    | Some hist_match ->
+        (* Devuelve solo el sufijo que falta tras el prefix *)
+        let suffix = String.sub hist_match (String.length current)
+                       (String.length hist_match - String.length current) in
+        Lwt.return (Some suffix)
     | None ->
-        let query_text = build_completion_query ~history ~current in
-        let* result = Ai.query ~user_input:query_text () in
-        match result with
-        | Ai.Command s when s <> "" ->
-            (* El AI a veces repite el prefix; lo quitamos si está *)
-            let suggestion =
-              if String.starts_with ~prefix:current s
-              then String.sub s (String.length current)
-                     (String.length s - String.length current)
-              else s
-            in
-            let suggestion = String.trim suggestion in
-            if suggestion = "" then Lwt.return None
-            else begin
-              Hashtbl.replace cache key suggestion;
-              Lwt.return (Some suggestion)
-            end
-        | _ -> Lwt.return None
-  end
+        if not (enabled ()) || String.length current < 2 then
+          Lwt.return None
+        else
+          let key = String.concat "|" history ^ "::" ^ current in
+          match Hashtbl.find_opt cache key with
+          | Some s -> Lwt.return (Some s)
+          | None ->
+              let query_text = build_completion_query ~history ~current in
+              let* result = Ai.query ~user_input:query_text () in
+              match result with
+              | Ai.Command s when s <> "" ->
+                  let suggestion =
+                    if String.starts_with ~prefix:current s
+                    then String.sub s (String.length current)
+                           (String.length s - String.length current)
+                    else s
+                  in
+                  let suggestion = String.trim suggestion in
+                  if suggestion = "" then Lwt.return None
+                  else begin
+                    Hashtbl.replace cache key suggestion;
+                    Lwt.return (Some suggestion)
+                  end
+              | _ -> Lwt.return None
 
 (* Para integración futura con lambda-term: el callback recibe la sugerencia
    y la pinta en gris (ANSI dim) tras el cursor. Por ahora exponemos solo

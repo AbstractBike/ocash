@@ -11,7 +11,7 @@ let create_env () : env =
   ) (Unix.environment ());
   t
 
-let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"]
+let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"; "hsearch"]
 
 let expand_vars env s =
   let buf = Buffer.create (String.length s) in
@@ -78,6 +78,14 @@ let run_builtin env argv =
   | "set" :: [] ->
       Hashtbl.iter (fun k v -> Printf.printf "%s=%s\n" k v) env;
       Lwt.return 0
+  | "history" :: _ ->
+      List.iteri (fun i s -> Printf.printf "%5d  %s\n" (i+1) s) (History.all ());
+      Lwt.return 0
+  | "hsearch" :: rest ->
+      let q = String.concat " " rest in
+      let matches = History.fuzzy_search ~limit:20 q in
+      List.iter (fun m -> print_endline m) matches;
+      Lwt.return (if matches = [] then 1 else 0)
   | "ansible" :: rest ->
       Ansible.dispatch rest
   | "ocaml" :: rest ->

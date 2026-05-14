@@ -219,10 +219,45 @@ let build_input_with_context ~history ~user_input =
        Petición actual: %s"
       ctx user_input
 
-let query ?(history=[]) ~user_input () =
+(* ============================================================ *)
+(* Multi-turn: conversación AI persistente durante la sesión    *)
+(* ============================================================ *)
+
+let conversation : (string * string) list ref = ref []  (* (role, content) *)
+let max_turns = 6
+
+let conv_add_user msg =
+  conversation := !conversation @ [("user", msg)];
+  if List.length !conversation > max_turns * 2 then
+    conversation := List.tl !conversation
+
+let conv_add_assistant msg =
+  conversation := !conversation @ [("assistant", msg)]
+
+let conv_reset () = conversation := []
+
+(* ============================================================ *)
+(* Self-correction: dado comando fallido + stderr, propone fix   *)
+(* ============================================================ *)
+
+let build_correction_prompt ~failed_cmd ~exit_code ~stderr =
+  Printf.sprintf
+    "El usuario ejecutó este comando que falló:\n  $ %s\n\
+     Exit code: %d\nStderr:\n%s\n\n\
+     Sugiere UN comando shell corregido. Solo el comando, sin explicación."
+    failed_cmd exit_code stderr
+
+let query ?(history=[]) ?(multi_turn=false) ~user_input () =
   if not !ai_enabled then Lwt.return Disabled
   else
-    let user_input = build_input_with_context ~history ~user_input in
+    let user_input =
+      if multi_turn && !conversation <> [] then
+        let convo = String.concat "\n" (List.map (fun (role, msg) ->
+          Printf.sprintf "%s: %s" role msg) !conversation) in
+        Printf.sprintf "Conversación previa:\n%s\n\nuser: %s" convo user_input
+      else
+        build_input_with_context ~history ~user_input
+    in
     match !current_backend with
     | Local ->
         query_openai_compat ~url:!server_url ~headers:[] ~user_input

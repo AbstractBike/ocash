@@ -2,17 +2,48 @@ open Lwt.Syntax
 
 let () = Lwt_engine.set (new Lwt_engine.libev ())
 
-let history : string Queue.t = Queue.create ()
-let max_history = 1000
+(* Historial persistente (Ocash_lib.History) reemplaza el Queue local. *)
+let add_history line = Ocash_lib.History.add line
 
-let add_history line =
-  if String.trim line <> "" then begin
-    Queue.push line history;
-    if Queue.length history > max_history then
-      ignore (Queue.pop history)
+let last_line = ref ""
+let last_exit = ref 0
+let last_stderr = ref ""
+
+(* Self-correction: si el último comando falló (exit != 0) y AI está
+   activa, ofrece al usuario que el AI proponga una corrección. *)
+let maybe_self_correct env =
+  let open Ocash_lib in
+  if !last_exit = 0 || !last_line = "" || not !Ai.ai_enabled then Lwt.return ()
+  else if not (Lazy.force Readline.is_tty) then Lwt.return ()
+  else begin
+    Printf.printf "%s↳ exit %d. ¿AI auto-corregir?%s [s/N] %!"
+      Readline.c_yellow !last_exit Readline.c_reset;
+    let ans = try input_line stdin |> String.trim |> String.lowercase_ascii
+              with End_of_file -> "n" in
+    match ans with
+    | "s" | "si" | "sí" | "y" | "yes" ->
+        let prompt = Ai.build_correction_prompt
+          ~failed_cmd:!last_line ~exit_code:!last_exit ~stderr:!last_stderr in
+        let* result = Ai.query ~user_input:prompt () in
+        (match result with
+         | Ai.Command cmd ->
+             Printf.printf "%s→ %s%s\n%!" Readline.c_cyan cmd Readline.c_reset;
+             Printf.printf "%s¿ejecutar?%s [S/n] %!"
+               Readline.c_yellow Readline.c_reset;
+             let go = try input_line stdin |> String.trim |> String.lowercase_ascii
+                      with End_of_file -> "n" in
+             (match go with
+              | "" | "s" | "y" | "yes" | "si" | "sí" ->
+                  let* _ = Eval.eval_statement env
+                    (match Parser.parse cmd with Ok s -> s | _ -> Ast.Empty) in
+                  Lwt.return ()
+              | _ -> Lwt.return ())
+         | _ -> Lwt.return ())
+    | _ -> Lwt.return ()
   end
 
 let eval_line env line =
+  last_line := line;
   add_history line;
   (* Fallback a bash si el input usa construcciones que ocash no parsea
      nativamente (if/for/$()/&&/;/[[ ]]/heredocs/glob/tilde/...). *)
@@ -31,18 +62,16 @@ let eval_line env line =
         Ocash_lib.Bash.run line
     | Ok stmt ->
         Lwt.catch
-          (fun () -> Ocash_lib.Eval.eval_statement env stmt)
+          (fun () ->
+            let* code = Ocash_lib.Eval.eval_statement env stmt in
+            last_exit := code;
+            Lwt.return code)
           (fun exn ->
             Printf.eprintf "\027[31merror:\027[0m %s\n%!" (Printexc.to_string exn);
+            last_exit := 1;
             Lwt.return 1)
 
-let last_history_entries n =
-  let lst = ref [] in
-  Queue.iter (fun s -> lst := s :: !lst) history;
-  let recent = List.rev !lst in
-  let len = List.length recent in
-  if len <= n then recent
-  else List.filteri (fun i _ -> i >= len - n) recent
+let last_history_entries n = Ocash_lib.History.last_n n
 
 let handle_nl ?(with_history=false) env input =
   let open Ocash_lib in
@@ -55,7 +84,8 @@ let handle_nl ?(with_history=false) env input =
     Readline.c_yellow
     (if with_history then " (con contexto)" else "")
     "" Readline.c_reset;
-  let* result = Ai.query ~history:history_ctx ~user_input:query () in
+  Ai.conv_add_user query;
+  let* result = Ai.query ~history:history_ctx ~multi_turn:true ~user_input:query () in
   print_string "                    \r";
   match result with
   | Ai.Disabled ->
@@ -65,6 +95,7 @@ let handle_nl ?(with_history=false) env input =
       Printf.printf "%s✗ %s%s\n%!" Readline.c_red msg Readline.c_reset;
       Lwt.return ()
   | Ai.Command cmd ->
+      Ai.conv_add_assistant cmd;
       Printf.printf "%s→ %s%s%s\n%!"
         Readline.c_cyan Readline.c_bold cmd Readline.c_reset;
       Printf.printf "%s¿ejecutar?%s [S/n/e] %!"
@@ -121,6 +152,7 @@ let banner () =
 let () =
   let interactive = Lazy.force Ocash_lib.Readline.is_tty in
   Lwt_main.run begin
+    Ocash_lib.History.load ();
     if interactive then banner ();
     let env = Ocash_lib.Eval.create_env () in
     let* () = Ocash_lib.Ai.init () in
@@ -143,9 +175,10 @@ let () =
               let _ = Ocash_lib.Ocaml_eval.eval_phrase code in
               Lwt.return ()
             end
-            else
+            else begin
               let* _ = eval_line env line in
-              Lwt.return ()
+              maybe_self_correct env
+            end
           in
           loop ()
     in

@@ -30,6 +30,7 @@ depends: [
   "cohttp-lwt-unix" {>= "5.0"}
   "yojson"
   "conf-libev"
+  "alcotest" {with-test}
 ]
 depopts: [
   "ocamlfind"

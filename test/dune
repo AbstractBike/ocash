@@ -1,0 +1,4 @@
+(test
+ (name test_ocash)
+ (modes (byte exe))
+ (libraries alcotest ocash_lib unix))

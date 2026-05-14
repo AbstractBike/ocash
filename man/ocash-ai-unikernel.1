@@ -1,0 +1,75 @@
+.TH OCASH-AI-UNIKERNEL 1 "May 2026" "ocash 0.1.0" "User Commands"
+.SH NAME
+ocash-ai-unikernel \- servidor HTTP JIT que compila handlers OCaml en runtime
+.SH SYNOPSIS
+.B ocash-ai-unikernel
+.SH DESCRIPTION
+.B ocash-ai-unikernel
+es un servidor HTTP OpenAI-compatible que actúa como intermediario entre
+.BR ocash (1)
+y un LLM upstream (típicamente
+.B llama-server
++ Qwen2.5-OCamler).
+.PP
+Su función principal es construir un caché de \fIhandlers\fR OCaml
+compilados \fBJIT\fR en runtime:
+.IP \(bu 2
+Cuando una petición de \fBocash\fR coincide con un handler ya cacheado
+(\fIcache HIT\fR), la respuesta se devuelve en microsegundos sin
+contactar al LLM (offline).
+.IP \(bu 2
+En un \fIcache MISS\fR, el unikernel reenvía la petición al LLM upstream
+para que genere código OCaml. La respuesta se compila in-process con
+.BR Toploop ,
+se registra como nuevo handler y se persiste en
+.IR ~/.ocash/handlers/h_NNN.ml .
+.IP \(bu 2
+Los handlers persistidos sobreviven a reinicios: se recompilan al
+arranque.
+.SH OPTIONS
+Este binario no acepta opciones por línea de comando; se configura
+íntegramente vía variables de entorno (ver \fBENVIRONMENT\fR).
+.SH ENVIRONMENT
+.TP
+.B PORT
+Puerto en el que escucha el unikernel. Default: \fI8081\fR.
+.TP
+.B UPSTREAM_LLM
+URL del LLM upstream OpenAI-compatible. Default:
+\fIhttp://localhost:8080\fR.
+.TP
+.B HANDLERS_DIR
+Directorio donde se persisten los handlers compilados. Default:
+\fI~/.ocash/handlers\fR.
+.SH EXAMPLES
+Arranque típico junto con
+.BR llama-server :
+.PP
+.RS 4
+.nf
+$ llama-server -m models/model.gguf --port 8080 --ctx-size 2048 &
+$ PORT=8081 UPSTREAM_LLM=http://localhost:8080 \\
+    ./_build/default/unikernel/uni.exe &
+$ OCASH_AI_URL=http://localhost:8081 ocash
+.fi
+.RE
+.PP
+Comprobar estado y estadísticas:
+.PP
+.RS 4
+.nf
+$ curl http://localhost:8081/health
+ok
+$ curl http://localhost:8081/stats
+handlers cached: 17
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.ocash/handlers/
+Directorio con los handlers OCaml persistidos (\fIh_NNN.ml\fR).
+.SH AUTHOR
+Escrito por AbstractBike.
+.SH SEE ALSO
+.BR ocash (1),
+.BR ocaml (1)

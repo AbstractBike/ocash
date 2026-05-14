@@ -1,0 +1,123 @@
+.TH OCASH 1 "May 2026" "ocash 0.1.0" "User Commands"
+.SH NAME
+ocash \- OCaml shell interactiva con asistente AI multi-backend
+.SH SYNOPSIS
+.B ocash
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B ocash
+es una shell Unix interactiva escrita en OCaml que combina la ejecución
+nativa de comandos (pipes, redirects, asignaciones, builtins) con un
+fallback automático a \fBbash\fR(1) para construcciones complejas
+(control flow, command substitution, glob, heredocs, etc.).
+.PP
+Características destacadas:
+.IP \(bu 2
+Asistente AI con múltiples backends: \fBlocal\fR (llama-server,
+OpenAI-compatible), \fBclaude\fR CLI, \fBcodex\fR CLI, \fBanthropic\fR API,
+\fBopenai\fR API.
+.IP \(bu 2
+Modos en lenguaje natural: \fBhabla:\fR \fItexto\fR convierte la petición
+en un comando shell; el carácter \fBç\fR como sufijo añade contexto de
+historial al prompt.
+.IP \(bu 2
+Autocomplete fish-style con sugerencia gris (ghost text) basado en
+historial e inferencia AI on-the-fly cuando hay GPU.
+.IP \(bu 2
+Builtin \fBansible\fR (playbook, ping, run, hosts, inventory).
+.IP \(bu 2
+Toploop OCaml embebido (\fBml:\fR \fIexpr\fR) y comando \fBocaml\fR para
+compilar/construir desde la shell.
+.IP \(bu 2
+Self-correction: ante un comando con exit code distinto de cero o un
+error OCaml, ocash puede pedir al AI una corrección y proponerla.
+.IP \(bu 2
+Historial persistente en \fI~/.ocash/history\fR con búsqueda fuzzy
+(\fBhsearch\fR).
+.IP \(bu 2
+Unikernel companion JIT que compila handlers OCaml en runtime.
+.SH OPTIONS
+.TP
+.BR \-\-help ", " \-h
+Muestra la ayuda en pantalla y termina con código 0.
+.TP
+.BR \-\-version ", " \-V
+Imprime la versión de ocash y termina con código 0.
+.SH ENVIRONMENT
+.TP
+.B OCASH_AI_BACKEND
+Selecciona el backend AI. Valores: \fIlocal\fR (default), \fIclaude\fR,
+\fIcodex\fR, \fIanthropic\fR, \fIopenai\fR.
+.TP
+.B OCASH_AI_URL
+URL del servidor para los backends \fIlocal\fR y \fIopenai\fR. Default
+\fIhttp://localhost:8080\fR para local.
+.TP
+.B OCASH_AI_MODEL
+Modelo a usar en los backends API (default \fIclaude-haiku-4-5-20251001\fR
+para Anthropic).
+.TP
+.B OCASH_AI_STREAM
+\fI1\fR/\fI0\fR. Habilita o deshabilita SSE streaming en el backend
+local. Default: \fI1\fR.
+.TP
+.B OCASH_RAG
+\fI1\fR para augmentar la query AI con snippets de los archivos más
+relevantes del cwd (BM25).
+.TP
+.B ANTHROPIC_API_KEY
+API key para el backend \fIanthropic\fR.
+.TP
+.B OPENAI_API_KEY
+API key para el backend \fIopenai\fR.
+.SH EXAMPLES
+Arrancar ocash:
+.PP
+.RS 4
+.nf
+$ ocash
+.fi
+.RE
+.PP
+Usar AI en español:
+.PP
+.RS 4
+.nf
+ocash> habla: listar archivos OCaml del proyecto
+→ find . -name "*.ml" -not -path "./_build/*"
+¿ejecutar? [S/n/e]
+.fi
+.RE
+.PP
+Buscar en el historial con fuzzy match:
+.PP
+.RS 4
+.nf
+ocash> hsearch git st
+git status
+git stash pop
+.fi
+.RE
+.PP
+Evaluar OCaml inline:
+.PP
+.RS 4
+.nf
+ocash> ml: List.map (fun x -> x * 2) [1;2;3]
+\- : int list = [2; 4; 6]
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.ocashrc
+Se ejecuta automáticamente al arrancar la shell.
+.TP
+.I ~/.ocash/history
+Historial persistente (append-only, una línea por comando).
+.SH AUTHOR
+Escrito por AbstractBike.
+.SH SEE ALSO
+.BR bash (1),
+.BR ansible (1),
+.BR ocaml (1),
+.BR ocash-ai-unikernel (1)

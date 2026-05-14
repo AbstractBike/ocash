@@ -77,7 +77,6 @@ let suggest ~history ~current =
                   end
               | _ -> Lwt.return None
 
-(* Para integración futura con lambda-term: el callback recibe la sugerencia
-   y la pinta en gris (ANSI dim) tras el cursor. Por ahora exponemos solo
-   la lógica; la UI inline requiere subclase de LTerm_read_line con
-   override de #draw o uso de #set_completion con un display custom. *)
+(* La UI inline está en Readline.shell_readline: override de #stylise
+   añade el sufijo en gris, y la respuesta AI dispara self#draw_update
+   inmediatamente (no espera la siguiente tecla). *)

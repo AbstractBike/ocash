@@ -104,9 +104,13 @@ let build_prompt () =
     c_dim count c_reset
     c_bold
 
+(* Excepción inyectada en el mvar self#interrupt cuando el usuario pulsa
+   Ctrl-R. Lleva el texto actual del buffer (para precargar el picker). *)
+exception Trigger_hsearch of string
+
 (* Ghost-text inline: sugerencia AI mostrada en gris detrás del cursor,
    actualizada en cada cambio de input. Tab inserta la sugerencia. *)
-class shell_readline ?(history_ctx=[]) term completions prompt_str =
+class shell_readline ?(history_ctx=[]) ?(prefill="") term completions prompt_str =
   let suggestion = ref "" in
   let last_query_text = ref "" in
   object(self)
@@ -115,9 +119,16 @@ class shell_readline ?(history_ctx=[]) term completions prompt_str =
 
     initializer
       self#set_prompt (React.S.const (LTerm_text.of_utf8 prompt_str));
+      (* Si se nos pasó texto a precargar (e.g. tras un Ctrl-R picker que
+         seleccionó un comando) lo insertamos antes de arrancar el loop. *)
+      if prefill <> "" then begin
+        let zs = Zed_rope.of_string (Zed_string.of_utf8 prefill) in
+        Zed_edit.insert self#context zs
+      end;
       (* Cada vez que cambia el texto, dispara una query AI (debounced
          por el cache de Autocomplete). Cuando llega la sugerencia, la
-         guardamos en ref. El siguiente redraw la incluirá en #stylise. *)
+         guardamos en ref Y forzamos un redraw inmediato vía
+         self#draw_update — sin esperar a la siguiente tecla. *)
       if Autocomplete.enabled () then begin
         let _evt = React.E.map (fun _change ->
           let s = Zed_string.to_utf8 (Zed_rope.to_string (Zed_edit.text self#edit)) in
@@ -126,10 +137,26 @@ class shell_readline ?(history_ctx=[]) term completions prompt_str =
             Lwt.async (fun () ->
               let open Lwt.Syntax in
               let* sugg = Autocomplete.suggest ~history:history_ctx ~current:s in
-              (match sugg with
-               | Some s' when s' <> "" -> suggestion := s'
-               | _ -> suggestion := "");
-              Lwt.return ())
+              let changed = match sugg with
+                | Some s' when s' <> "" ->
+                    let prev = !suggestion in
+                    suggestion := s';
+                    prev <> s'
+                | _ ->
+                    let prev = !suggestion in
+                    suggestion := "";
+                    prev <> ""
+              in
+              (* Live redraw: sólo si el texto del buffer no ha cambiado
+                 desde que se lanzó la query (evita pintar sobre un
+                 estado distinto). Lwt es cooperativo, así que no
+                 colisiona con el draw del main loop. *)
+              if changed then begin
+                let now = Zed_string.to_utf8 (Zed_rope.to_string (Zed_edit.text self#edit)) in
+                if now = s then
+                  Lwt.catch (fun () -> self#draw_update) (fun _ -> Lwt.return_unit)
+                else Lwt.return_unit
+              end else Lwt.return_unit)
           end;
           if String.length s = 0 then suggestion := ""
         ) (Zed_edit.changes self#edit) in
@@ -137,6 +164,18 @@ class shell_readline ?(history_ctx=[]) term completions prompt_str =
       end
 
     method! show_box = false
+
+    (* Interceptamos Prev_search (Ctrl-R por defecto) para lanzar el
+       picker fuzzy. Empujamos una excepción al mvar de interrupt — eso
+       hace que #run salga limpiamente y read_input pueda capturarla y
+       lanzar el picker. *)
+    method! send_action action =
+      match action with
+      | LTerm_read_line.Prev_search ->
+          let cur = Zed_string.to_utf8 (Zed_rope.to_string (Zed_edit.text self#edit)) in
+          Lwt.async (fun () ->
+            Lwt_mvar.put self#interrupt (Trigger_hsearch cur))
+      | _ -> super#send_action action
 
     (* Añade el sufijo ghost en gris al texto stylise-ado. Solo cuando
        no estamos en modo "return" (final del input). *)
@@ -175,7 +214,145 @@ class shell_readline ?(history_ctx=[]) term completions prompt_str =
         in
         self#set_completion (String.length full_input - String.length last_word) local
       end
+
   end
+
+(* ───────────────────────── Ctrl-R Fuzzy picker ─────────────────────────
+   Picker estilo fzf implementado con LTerm bajo nivel (read_event, draw).
+   No subclase de LTerm_read_line porque queremos control total del
+   layout (lista de matches + barra de input + highlight) y el modelo
+   de LTerm_read_line.term está orientado a una sola línea de input.
+
+   Devuelve Some cmd si el usuario aceptó con Enter, None si canceló
+   con Esc o Ctrl-C. *)
+let fuzzy_picker ~term ~initial_query : string option Lwt.t =
+  let open Lwt.Syntax in
+  let query = ref initial_query in
+  let cursor = ref (String.length initial_query) in
+  let selected = ref 0 in
+  let max_rows = 10 in
+  let compute_matches () = History.fuzzy_search ~limit:max_rows !query in
+  let matches = ref (compute_matches ()) in
+  let recompute () =
+    matches := compute_matches ();
+    if !selected >= List.length !matches then selected := 0
+  in
+  let nth_opt lst n =
+    try Some (List.nth lst n) with _ -> None
+  in
+  let render () =
+    (* Limpia y dibuja la UI desde la posición actual hacia abajo. *)
+    let lines = ref [] in
+    let header =
+      Printf.sprintf "%s%s┃%s %s%s%s"
+        c_dim c_cyan c_reset c_bold !query c_reset
+    in
+    lines := header :: !lines;
+    let n = List.length !matches in
+    let rows =
+      if n = 0 then [c_dim ^ "  (sin matches)" ^ c_reset]
+      else
+        List.mapi (fun i m ->
+          if i = !selected then
+            Printf.sprintf "%s▶ %s%s" c_yellow m c_reset
+          else
+            "  " ^ m
+        ) !matches
+    in
+    List.iter (fun r -> lines := r :: !lines) rows;
+    let lines = List.rev !lines in
+    let total = List.length lines in
+    let* () = LTerm.fprint term "\r" in
+    let* () = LTerm.clear_line term in
+    let* () = Lwt_list.iter_s (fun l ->
+      let* () = LTerm.fprintl term l in
+      LTerm.clear_line term) lines in
+    (* Sube el cursor hasta justo bajo la primera línea (la barra de
+       query) para que parezca un "modal" inline. *)
+    let* () = LTerm.move term (-(total - 1)) 0 in
+    (* Coloca el cursor dentro del query, offset = strlen prefix "┃ " = 2 *)
+    let* () = LTerm.fprint term "\r" in
+    let prefix_width = 2 in
+    let* () = LTerm.move term 0 (prefix_width + !cursor) in
+    LTerm.flush term
+  in
+  let clear_ui () =
+    (* Asume cursor en la línea del query. Limpia max_rows+1 líneas
+       hacia abajo y vuelve. *)
+    let* () = LTerm.fprint term "\r" in
+    let* () = LTerm.clear_line term in
+    let* () =
+      let n = max_rows in
+      let rec loop i =
+        if i = 0 then Lwt.return_unit
+        else
+          let* () = LTerm.fprint term "\n" in
+          let* () = LTerm.clear_line term in
+          loop (i - 1)
+      in
+      loop n
+    in
+    let* () = LTerm.move term (-max_rows) 0 in
+    LTerm.fprint term "\r"
+  in
+  let* mode = LTerm.enter_raw_mode term in
+  Lwt.finalize
+    (fun () ->
+      let rec loop () =
+        let* () = render () in
+        let* ev = LTerm.read_event term in
+        match ev with
+        | LTerm_event.Key { code = LTerm_key.Escape; _ } ->
+            let* () = clear_ui () in
+            Lwt.return None
+        | LTerm_event.Key { control = true; code = LTerm_key.Char c; _ }
+          when (try let ch = Uchar.to_char c in ch = 'c' || ch = 'g'
+                with _ -> false) ->
+            let* () = clear_ui () in
+            Lwt.return None
+        | LTerm_event.Key { code = LTerm_key.Enter; _ } ->
+            let* () = clear_ui () in
+            Lwt.return (nth_opt !matches !selected)
+        | LTerm_event.Key { code = LTerm_key.Up; _ } ->
+            if !selected > 0 then decr selected;
+            loop ()
+        | LTerm_event.Key { control = true; code = LTerm_key.Char c; _ }
+          when (try Uchar.to_char c = 'p' with _ -> false) ->
+            if !selected > 0 then decr selected;
+            loop ()
+        | LTerm_event.Key { code = LTerm_key.Down; _ } ->
+            let n = List.length !matches in
+            if !selected < n - 1 then incr selected;
+            loop ()
+        | LTerm_event.Key { control = true; code = LTerm_key.Char c; _ }
+          when (try Uchar.to_char c = 'n' with _ -> false) ->
+            let n = List.length !matches in
+            if !selected < n - 1 then incr selected;
+            loop ()
+        | LTerm_event.Key { code = LTerm_key.Backspace; _ } ->
+            if !cursor > 0 then begin
+              let q = !query in
+              query := String.sub q 0 (!cursor - 1)
+                       ^ String.sub q !cursor (String.length q - !cursor);
+              decr cursor;
+              recompute ()
+            end;
+            loop ()
+        | LTerm_event.Key { code = LTerm_key.Char ch; control = false;
+                            meta = false; _ } ->
+            (try
+              let c = Uchar.to_char ch in
+              let q = !query in
+              query := String.sub q 0 !cursor ^ String.make 1 c
+                       ^ String.sub q !cursor (String.length q - !cursor);
+              incr cursor;
+              recompute ()
+            with _ -> ());
+            loop ()
+        | _ -> loop ()
+      in
+      loop ())
+    (fun () -> LTerm.leave_raw_mode term mode)
 
 (* REPL "tonto" para modo no-TTY (scripts, pipes, CI). *)
 let read_input_dumb ~with_prompt () =
@@ -194,13 +371,26 @@ let read_input ?(history=[]) () =
   else
     let completions = Completion.get_all "" in
     let prompt      = build_prompt () in
-    Lwt.catch
-      (fun () ->
-        let* term = Lazy.force LTerm.stdout in
-        let rl = new shell_readline ~history_ctx:history term completions prompt in
-        let* result = rl#run in
-        Lwt.return_some (Zed_string.to_utf8 result))
-      (function
-        | LTerm_read_line.Interrupt -> Lwt.return_some ""
-        | End_of_file               -> exit 0
-        | exn                       -> Lwt.fail exn)
+    let rec attempt ?(prefill="") () =
+      Lwt.catch
+        (fun () ->
+          let* term = Lazy.force LTerm.stdout in
+          let rl = new shell_readline ~history_ctx:history ~prefill
+                     term completions prompt in
+          let* result = rl#run in
+          Lwt.return_some (Zed_string.to_utf8 result))
+        (function
+          | Trigger_hsearch initial ->
+              (* El loop de read_line ya hizo cleanup al raise.
+                 Lanzamos el picker; cuando termine reentramos con el
+                 comando elegido como prefill. *)
+              let* term = Lazy.force LTerm.stdout in
+              let* picked = fuzzy_picker ~term ~initial_query:initial in
+              (match picked with
+               | Some cmd -> attempt ~prefill:cmd ()
+               | None     -> attempt ~prefill:initial ())
+          | LTerm_read_line.Interrupt -> Lwt.return_some ""
+          | End_of_file               -> exit 0
+          | exn                       -> Lwt.fail exn)
+    in
+    attempt ()

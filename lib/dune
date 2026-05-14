@@ -1,0 +1,11 @@
+(library
+ (name ocash_lib)
+ (libraries
+  lwt lwt.unix
+  lambda-term
+  angstrom
+  cohttp-lwt-unix
+  yojson
+  str
+  unix)
+ (preprocess (pps lwt_ppx)))

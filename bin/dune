@@ -1,0 +1,4 @@
+(executable
+ (name main)
+ (public_name ocash)
+ (libraries ocash_lib lwt.unix lambda-term))

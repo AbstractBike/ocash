@@ -13,10 +13,29 @@ USE_SUDO="${USE_SUDO:-auto}"
 
 # Detecta GPU NVIDIA → build con CUDA
 CUDA_FLAG=""
+CUDA_ARCH_FLAG=""
 if command -v nvidia-smi &>/dev/null || [ -e /dev/nvidia0 ]; then
   if command -v nvcc &>/dev/null; then
     CUDA_FLAG="-DGGML_CUDA=ON"
     echo "→ NVIDIA + nvcc detectados, compilando con CUDA"
+
+    # Detecta compute capabilities reales para evitar warnings de sm_35/37/50
+    # deprecados ("nvcc warning: ... deprecated gpu targets"). Sin esto, llama.cpp
+    # compila para una lista por defecto que incluye arquitecturas antiguas.
+    arch_list=""
+    if command -v nvidia-smi &>/dev/null; then
+      arch_list=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+        | awk -F. 'NF==2 {printf "%s%d%d", (NR>1?";":""), $1, $2}')
+    fi
+    if [ -z "$arch_list" ]; then
+      # Fallback: arquitecturas modernas soportadas por CUDA 11/12.
+      # Volta(70) Turing(75) Ampere(80/86) Ada(89) Hopper(90).
+      arch_list="70;75;80;86;89;90"
+      echo "  (no se pudo detectar compute_cap; usando default $arch_list)"
+    else
+      echo "  compute capabilities detectadas: $arch_list"
+    fi
+    CUDA_ARCH_FLAG="-DCMAKE_CUDA_ARCHITECTURES=$arch_list -DCMAKE_CUDA_FLAGS=-Wno-deprecated-gpu-targets"
   else
     echo "⚠ NVIDIA detectado pero sin nvcc. Instala CUDA toolkit para GPU support."
     echo "  Continúo con build CPU."
@@ -72,7 +91,7 @@ cmake -B build \
   -DLLAMA_BUILD_TESTS=OFF \
   -DLLAMA_BUILD_EXAMPLES=OFF \
   -DLLAMA_BUILD_SERVER=ON \
-  $CUDA_FLAG
+  $CUDA_FLAG $CUDA_ARCH_FLAG
 
 # Build solo llama-server (más rápido)
 echo "→ Building llama-server (-j$JOBS)..."

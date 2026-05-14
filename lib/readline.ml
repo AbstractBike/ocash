@@ -79,7 +79,7 @@ let build_prompt () =
     c_dim count c_reset
     c_bold
 
-class shell_readline term completions prompt_str = object(self)
+class shell_readline ?(history_ctx=[]) term completions prompt_str = object(self)
   inherit LTerm_read_line.read_line ()
   inherit [Zed_string.t] LTerm_read_line.term term
 
@@ -89,19 +89,39 @@ class shell_readline term completions prompt_str = object(self)
   method! show_box = false
 
   method! completion =
-    let prefix =
-      Zed_rope.to_string (Zed_edit.text self#edit)
-      |> Zed_string.to_utf8
+    let full_input =
+      Zed_rope.to_string (Zed_edit.text self#edit) |> Zed_string.to_utf8
+    in
+    let last_word =
+      full_input
       |> String.split_on_char ' '
       |> List.rev
       |> (function [] -> "" | h :: _ -> h)
     in
-    let matches =
-      List.filter (String.starts_with ~prefix) completions
+    (* 1. Completion local inmediato (path, builtins) *)
+    let local =
+      List.filter (String.starts_with ~prefix:last_word) completions
       |> List.map (fun s ->
           (Zed_string.of_utf8 s, Zed_string.of_utf8 ""))
     in
-    self#set_completion 0 matches
+    self#set_completion (String.length full_input - String.length last_word) local;
+
+    (* 2. Si autocomplete AI está habilitado y el input es razonable,
+       dispara una query async; cuando llegue, añade la sugerencia
+       AI a las completions ya mostradas. *)
+    if Autocomplete.enabled () && String.length full_input >= 2 then
+      Lwt.async (fun () ->
+        let open Lwt.Syntax in
+        let* sugg = Autocomplete.suggest ~history:history_ctx ~current:full_input in
+        (match sugg with
+         | Some s ->
+             let ai_entry =
+               (Zed_string.of_utf8 (full_input ^ s),
+                Zed_string.of_utf8 " [AI]")
+             in
+             self#set_completion 0 (local @ [ai_entry])
+         | None -> ());
+        Lwt.return ())
 end
 
 (* REPL "tonto" para modo no-TTY (scripts, pipes, CI). *)
@@ -115,7 +135,7 @@ let read_input_dumb ~with_prompt () =
 
 let is_tty = lazy (try Unix.isatty Unix.stdin with _ -> false)
 
-let read_input () =
+let read_input ?(history=[]) () =
   if not (Lazy.force is_tty) then
     read_input_dumb ~with_prompt:false ()
   else
@@ -124,7 +144,7 @@ let read_input () =
     Lwt.catch
       (fun () ->
         let* term = Lazy.force LTerm.stdout in
-        let rl = new shell_readline term completions prompt in
+        let rl = new shell_readline ~history_ctx:history term completions prompt in
         let* result = rl#run in
         Lwt.return_some (Zed_string.to_utf8 result))
       (function

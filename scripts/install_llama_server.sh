@@ -10,12 +10,15 @@ INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BUILD_DIR="${BUILD_DIR:-/tmp/llama.cpp-build}"
 JOBS="$(nproc 2>/dev/null || echo 4)"
 USE_SUDO="${USE_SUDO:-auto}"
+USE_CUDA="${USE_CUDA:-auto}"   # auto|0|1 — set 0 to force CPU build
 
 # Detecta GPU NVIDIA → build con CUDA
 CUDA_FLAG=""
 CUDA_ARCH_FLAG=""
 CUDA_HOST_FLAG=""
-if command -v nvidia-smi &>/dev/null || [ -e /dev/nvidia0 ]; then
+if [ "$USE_CUDA" = "0" ]; then
+  echo "→ USE_CUDA=0 → forzando build CPU"
+elif command -v nvidia-smi &>/dev/null || [ -e /dev/nvidia0 ]; then
   if command -v nvcc &>/dev/null; then
     CUDA_FLAG="-DGGML_CUDA=ON"
     echo "→ NVIDIA + nvcc detectados, compilando con CUDA"
@@ -68,13 +71,22 @@ if command -v nvidia-smi &>/dev/null || [ -e /dev/nvidia0 ]; then
       done
       if [ -z "$CUDA_HOST_FLAG" ]; then
         echo ""
-        echo "  ⚠ g++ ${gxx_major} puede ser incompatible con tu CUDA toolkit"
-        echo "    (síntoma: 'parameter packs not expanded with ...' en std_function.h)."
-        echo "    Si la compilación falla, instala un g++ más viejo:"
-        echo "      sudo apt-get install -y g++-10"
-        echo "    y vuelve a correr este script con FORCE_RECONFIGURE=1."
-        echo "    Override manual: CUDA_HOST_COMPILER=/usr/bin/g++-10 $0"
+        echo "  ✗ g++ ${gxx_major} es incompatible con la mayoría de toolkits CUDA"
+        echo "    (síntoma: 'parameter packs not expanded with ...' en std_function.h"
+        echo "    al compilar acc.cu.o). No encontré g++-11/10/9/8 instalado."
         echo ""
+        echo "    Opciones:"
+        echo "      1. Instala un g++ compatible (recomendado):"
+        echo "           sudo apt-get install -y g++-10"
+        echo "         Después: FORCE_RECONFIGURE=1 $0"
+        echo ""
+        echo "      2. Pinea uno manualmente si está en otra ruta:"
+        echo "           CUDA_HOST_COMPILER=/path/to/g++ FORCE_RECONFIGURE=1 $0"
+        echo ""
+        echo "      3. Compila sin CUDA (build CPU, sin GPU offload):"
+        echo "           USE_CUDA=0 FORCE_RECONFIGURE=1 $0"
+        echo ""
+        exit 1
       fi
     fi
   else

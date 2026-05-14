@@ -195,7 +195,47 @@ let banner () =
      then "autocomplete on-the-fly habilitado"
      else "autocomplete on-the-fly deshabilitado")
 
+let version_string = "ocash 0.1.0"
+
+let help_text = {|ocash — OCaml shell interactiva con AI
+
+USO:
+  ocash [OPTIONS]
+
+OPCIONES:
+  --help, -h       Muestra esta ayuda y termina
+  --version, -V    Muestra la versión y termina
+
+VARIABLES DE ENTORNO:
+  OCASH_AI_BACKEND   Backend AI: local | claude | codex | anthropic | openai
+  OCASH_AI_URL       URL del backend (default http://localhost:8080 para local)
+  OCASH_AI_MODEL     Modelo (para backends API)
+  OCASH_AI_STREAM    1/0 — streaming SSE en backend local (default 1)
+  OCASH_RAG          1 — augmenta queries AI con snippets del cwd
+  ANTHROPIC_API_KEY  Key para backend anthropic
+  OPENAI_API_KEY     Key para backend openai
+
+ARCHIVOS:
+  ~/.ocashrc         Se ejecuta al arrancar (si existe)
+  ~/.ocash/history   Historial persistente
+
+Ver `man ocash` para más detalle.
+|}
+
+let handle_argv () =
+  let args = Array.to_list Sys.argv in
+  let has flag = List.exists (fun a -> a = flag) args in
+  if has "--help" || has "-h" then begin
+    print_string help_text;
+    exit 0
+  end;
+  if has "--version" || has "-V" then begin
+    print_endline version_string;
+    exit 0
+  end
+
 let () =
+  handle_argv ();
   let interactive = Lazy.force Ocash_lib.Readline.is_tty in
   Lwt_main.run begin
     Ocash_lib.History.load ();

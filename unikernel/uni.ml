@@ -150,21 +150,52 @@ module Sandbox = struct
 
   exception Forbidden of string
 
+  (* Constructores stdlib + de tipos comunes que no son módulos.
+     Los handlers del LLM usan Some/None constantemente porque
+     retornan string option. *)
+  let allowed_constructors = [
+    "Some"; "None"; "Ok"; "Error";
+    "true"; "false"; "[]"; "::";
+  ]
+
+  (* check_lident para identificadores/módulos cualificados (con punto).
+     Verifica que el módulo de cabeza esté permitido. *)
   let check_lident lid =
     let head = lident_head lid in
     let tail = lident_tail lid in
-    (* Si el head es un módulo conocido, debe estar en la whitelist *)
     if List.mem head banned_modules then
       raise (Forbidden (Printf.sprintf "uso de módulo prohibido %S" head));
-    (* Si parece nombre de módulo (mayúscula inicial) y no está en whitelist,
-       lo rechazamos también: cerrojo por defecto. *)
-    if String.length head > 0
+    (* Solo aplicamos el cierre por defecto si el lident usa el head como
+       módulo (es decir, hay un punto: Ldot). Idents simples como `Some`
+       o `Ok` son constructores, no referencias a módulos. *)
+    let is_module_ref = match lid with
+      | Longident.Ldot _ | Longident.Lapply _ -> true
+      | Longident.Lident _ -> false
+    in
+    if is_module_ref
+       && String.length head > 0
        && head.[0] >= 'A' && head.[0] <= 'Z'
        && not (List.mem head allowed_modules)
     then
       raise (Forbidden (Printf.sprintf "módulo no whitelisted: %S" head));
     if List.mem tail banned_idents then
       raise (Forbidden (Printf.sprintf "identificador prohibido %S" tail))
+
+  (* check_constructor: para Pexp_construct/Ppat_construct, valida que el
+     constructor esté en whitelist si es un Lident simple. Si es Ldot
+     (cualificado, ej. Some.foo) cae a check_lident normal. *)
+  let check_constructor lid =
+    match lid with
+    | Longident.Lident name ->
+        if not (List.mem name allowed_constructors)
+           && String.length name > 0
+           && name.[0] >= 'A' && name.[0] <= 'Z'
+        then
+          (* Constructor desconocido con mayúscula: podría ser custom
+             (válido). Solo verificamos no esté en blacklist. *)
+          if List.mem name banned_modules then
+            raise (Forbidden (Printf.sprintf "constructor prohibido %S" name))
+    | _ -> check_lident lid
 
   let iterator =
     let open Ast_iterator in
@@ -173,8 +204,8 @@ module Sandbox = struct
       expr = (fun self e ->
         (match e.Parsetree.pexp_desc with
          | Pexp_ident { txt; _ }
-         | Pexp_construct ({ txt; _ }, _)
          | Pexp_new { txt; _ } -> check_lident txt
+         | Pexp_construct ({ txt; _ }, _) -> check_constructor txt
          | _ -> ());
         default.expr self e);
       typ = (fun self t ->
@@ -185,7 +216,7 @@ module Sandbox = struct
         default.typ self t);
       pat = (fun self p ->
         (match p.Parsetree.ppat_desc with
-         | Ppat_construct ({ txt; _ }, _)
+         | Ppat_construct ({ txt; _ }, _) -> check_constructor txt
          | Ppat_type { txt; _ } -> check_lident txt
          | _ -> ());
         default.pat self p);

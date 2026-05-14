@@ -430,6 +430,13 @@ let init () =
   let url = Option.value ~default:"http://localhost:8080"
     (Sys.getenv_opt "OCASH_AI_URL") in
   server_url := url;
+  (* Si backend=local y OCASH_LLAMA_AUTOSTART=1, intenta arrancar llama-server *)
+  let* () =
+    if !current_backend = Local then
+      let* _ = Llama_autostart.start_if_needed ~url in
+      Lwt.return ()
+    else Lwt.return ()
+  in
   let* available =
     match !current_backend with
     | Local      -> check_local_server ()

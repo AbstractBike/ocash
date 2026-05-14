@@ -234,8 +234,26 @@ let handle_argv () =
     exit 0
   end
 
+(* Restaura el terminal cuando ocash muere abruptamente (Sys.Break,
+   uncaught exn, etc). Sin esto, lambda-term puede dejar el TTY en raw
+   mode y el shell padre muestra el prompt con escapes literales. *)
+let reset_terminal () =
+  print_string "\027[?1049l";  (* salir alt screen si entró *)
+  print_string "\027[?25h";    (* mostrar cursor *)
+  print_string "\027[0m";      (* reset attrs/color *)
+  flush stdout;
+  (* Si stdin es TTY, restaurar modo canónico vía stty (best-effort) *)
+  if Unix.isatty Unix.stdin then
+    try
+      let attr = Unix.tcgetattr Unix.stdin in
+      let attr = { attr with
+        c_icanon = true; c_echo = true; c_isig = true } in
+      Unix.tcsetattr Unix.stdin Unix.TCSAFLUSH attr
+    with _ -> ()
+
 let () =
   handle_argv ();
+  at_exit reset_terminal;
   let interactive = Lazy.force Ocash_lib.Readline.is_tty in
   Lwt_main.run begin
     Ocash_lib.History.load ();
@@ -296,5 +314,12 @@ let () =
           in
           loop ()
     in
-    loop ()
+    Lwt.catch loop (function
+      | Sys.Break ->
+          (* Ctrl-C escapando del handler: salimos limpio en vez de crash *)
+          print_endline ""; Lwt.return ()
+      | exn ->
+          Printf.eprintf "ocash: error no manejado: %s\n%!"
+            (Printexc.to_string exn);
+          Lwt.return ())
   end

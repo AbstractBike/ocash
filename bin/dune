@@ -1,4 +1,26 @@
 (executable
  (name main)
  (public_name ocash)
- (libraries ocash_lib lwt.unix lambda-term))
+ (libraries ocash_lib lwt.unix lambda-term)
+ (modes (native exe))
+ (ocamlopt_flags
+  (:standard)
+  (:include ocamlopt_extra.sexp))
+ (link_flags
+  (:standard)
+  (:include link_extra.sexp)))
+
+; Selecciona flags adicionales según el profile activo.
+; Profile "static" produce un fatbin (single statically-linked binary).
+(rule
+ (targets ocamlopt_extra.sexp link_extra.sexp)
+ (action
+  (bash
+   "case '%{profile}' in \
+      static) \
+        echo '()' > ocamlopt_extra.sexp; \
+        echo '(-ccopt -static -ccopt -no-pie)' > link_extra.sexp;; \
+      *) \
+        echo '()' > ocamlopt_extra.sexp; \
+        echo '()' > link_extra.sexp;; \
+    esac")))

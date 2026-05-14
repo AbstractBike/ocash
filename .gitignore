@@ -5,3 +5,5 @@ dist/
 # unikernel JIT handlers cache (sí queremos commitear los .ml semilla
 # si los hubiera, pero no los generados runtime)
 .ocash/
+# claude code local state (worktrees de agentes, settings)
+.claude/

@@ -14,6 +14,7 @@ USE_SUDO="${USE_SUDO:-auto}"
 # Detecta GPU NVIDIA → build con CUDA
 CUDA_FLAG=""
 CUDA_ARCH_FLAG=""
+CUDA_HOST_FLAG=""
 if command -v nvidia-smi &>/dev/null || [ -e /dev/nvidia0 ]; then
   if command -v nvcc &>/dev/null; then
     CUDA_FLAG="-DGGML_CUDA=ON"
@@ -36,6 +37,36 @@ if command -v nvidia-smi &>/dev/null || [ -e /dev/nvidia0 ]; then
       echo "  compute capabilities detectadas: $arch_list"
     fi
     CUDA_ARCH_FLAG="-DCMAKE_CUDA_ARCHITECTURES=$arch_list -DCMAKE_CUDA_FLAGS=-Wno-deprecated-gpu-targets"
+
+    # gcc 11+ con CUDA <= 11.4 falla en std_function.h con
+    # "parameter packs not expanded with '...'". Si nvcc es viejo y el g++ por
+    # defecto es nuevo, escoge un g++ compatible como host compiler.
+    nvcc_major_minor=$(nvcc --version 2>/dev/null \
+      | sed -nE 's/.*release ([0-9]+)\.([0-9]+).*/\1.\2/p' | head -1)
+    gxx_major=$(g++ -dumpversion 2>/dev/null | cut -d. -f1)
+    needs_older_gxx=false
+    case "$nvcc_major_minor" in
+      9.*|10.*|11.0|11.1|11.2|11.3|11.4)
+        [ "${gxx_major:-0}" -ge 11 ] && needs_older_gxx=true ;;
+      11.5|11.6|11.7|11.8)
+        [ "${gxx_major:-0}" -ge 12 ] && needs_older_gxx=true ;;
+    esac
+    if $needs_older_gxx; then
+      for candidate in g++-10 g++-9 g++-8; do
+        if command -v "$candidate" &>/dev/null; then
+          host_cxx=$(command -v "$candidate")
+          CUDA_HOST_FLAG="-DCMAKE_CUDA_HOST_COMPILER=$host_cxx"
+          echo "  nvcc $nvcc_major_minor vs g++ $gxx_major incompatible;"
+          echo "  usando $host_cxx como CUDA host compiler"
+          break
+        fi
+      done
+      if [ -z "$CUDA_HOST_FLAG" ]; then
+        echo "  ⚠ nvcc $nvcc_major_minor no soporta g++ $gxx_major y no encuentro g++-10/9/8."
+        echo "    Instala uno: sudo apt-get install -y g++-10"
+        echo "    o actualiza el CUDA toolkit a >= 12.x."
+      fi
+    fi
   else
     echo "⚠ NVIDIA detectado pero sin nvcc. Instala CUDA toolkit para GPU support."
     echo "  Continúo con build CPU."
@@ -85,13 +116,24 @@ else
 fi
 
 # Configure
+# CMake cachea CMAKE_CUDA_ARCHITECTURES y el host compiler en build/CMakeCache.txt,
+# por lo que un build previo con la lista vieja sigue forzando sm_35/etc. Borra el
+# cache si los flags cambiaron o si force-reconfigure se pidió explícitamente.
+if [ -f build/CMakeCache.txt ]; then
+  if ! grep -q "CMAKE_CUDA_ARCHITECTURES.*=${arch_list:-}" build/CMakeCache.txt 2>/dev/null \
+     || [ "${FORCE_RECONFIGURE:-0}" = "1" ]; then
+    echo "→ Limpiando build/ (cmake cache obsoleto)"
+    rm -rf build
+  fi
+fi
+
 echo "→ cmake configure..."
 cmake -B build \
   -DGGML_NATIVE=ON \
   -DLLAMA_BUILD_TESTS=OFF \
   -DLLAMA_BUILD_EXAMPLES=OFF \
   -DLLAMA_BUILD_SERVER=ON \
-  $CUDA_FLAG $CUDA_ARCH_FLAG
+  $CUDA_FLAG $CUDA_ARCH_FLAG $CUDA_HOST_FLAG
 
 # Build solo llama-server (más rápido)
 echo "→ Building llama-server (-j$JOBS)..."

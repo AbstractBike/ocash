@@ -42,10 +42,20 @@ let pipeline =
     (Ast.Single head)
     tail
 
+let assign_value =
+  quoted_double
+  <|> quoted_single
+  <|> take_while (fun c -> c <> ' ' && c <> '\t' && c <> '\n')
+
 let assign =
-  let+ key = take_while1 (fun c -> c <> '=' && c <> ' ' && c <> '\t')
+  let+ key = take_while1 (fun c ->
+    let code = Char.code c in
+    (code >= Char.code 'A' && code <= Char.code 'Z') ||
+    (code >= Char.code 'a' && code <= Char.code 'z') ||
+    (code >= Char.code '0' && code <= Char.code '9') ||
+    c = '_')
   and+ _   = char '='
-  and+ v   = take_while (fun c -> c <> ' ') in
+  and+ v   = assign_value in
   Ast.Assign (key, v)
 
 let statement =

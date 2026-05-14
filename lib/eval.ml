@@ -95,6 +95,8 @@ let find_in_path cmd =
         let full = Filename.concat dir cmd in
         if Sys.file_exists full then Some full else None)
 
+(* Aplica redirects globalmente y devuelve los fds salvados para restaurar.
+   Solo se usa para builtins fuera de pipelines (Single sin Pipe). *)
 let apply_redirects redirects =
   List.filter_map (fun r ->
     match r with
@@ -130,53 +132,146 @@ let restore_redirects saved =
     Unix.close saved_fd
   ) saved
 
-let run_external _env argv stdin_fd stdout_fd =
+(* Resuelve redirects a (stdin_fd, stdout_fd, stderr_fd, fds_to_close_in_parent).
+   No muta stdout global: solo abre archivos para los fds de un subproceso. *)
+let resolve_redirects redirects (in0, out0, err0) =
+  let i = ref in0 in
+  let o = ref out0 in
+  let e = ref err0 in
+  let opened = ref [] in
+  List.iter (fun r ->
+    match r with
+    | Ast.Stdout_to f ->
+        let fd = Unix.openfile f [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_TRUNC] 0o644 in
+        o := fd; opened := fd :: !opened
+    | Ast.Append_to f ->
+        let fd = Unix.openfile f [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_APPEND] 0o644 in
+        o := fd; opened := fd :: !opened
+    | Ast.Stdin_from f ->
+        let fd = Unix.openfile f [Unix.O_RDONLY] 0 in
+        i := fd; opened := fd :: !opened
+    | Ast.Stderr_to f ->
+        let fd = Unix.openfile f [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_TRUNC] 0o644 in
+        e := fd; opened := fd :: !opened
+  ) redirects;
+  (!i, !o, !e, !opened)
+
+(* Lanza un comando como subproceso con los fds dados.
+   close_in_child son fds extras (típicamente otros extremos de pipes)
+   que el child debe cerrar tras dup2. *)
+let spawn_command env argv redirects stdin_fd stdout_fd close_in_child =
   match argv with
   | [] -> Lwt.return 0
   | prog :: _ ->
-      match find_in_path prog with
-      | None ->
-          Printf.eprintf "ocash: %s: comando no encontrado\n%!" prog;
-          Lwt.return 127
-      | Some full_path ->
-          let pid = Unix.create_process full_path
-            (Array.of_list argv)
-            stdin_fd stdout_fd Unix.stderr
-          in
-          let* (_, status) = Lwt_unix.waitpid [] pid in
-          let code = match status with
-            | Unix.WEXITED n   -> n
-            | Unix.WSIGNALED _ -> 130
-            | Unix.WSTOPPED _  -> 128
-          in
-          last_exit_code := code;
-          Lwt.return code
+      let (i, o, e, opened) =
+        resolve_redirects redirects (stdin_fd, stdout_fd, Unix.stderr)
+      in
+      let close_in_parent () =
+        List.iter (fun fd -> try Unix.close fd with _ -> ()) opened
+      in
+      if List.mem prog builtins then begin
+        (* Builtin en pipeline: fork para aislar dup2 y env del padre.
+           En el child no podemos llamar Lwt_main.run (Lwt cree que el padre
+           ya está corriendo). Extraemos el resultado del promise asumiendo
+           que el builtin es síncrono (echo/pwd/cd/export/exit/set lo son). *)
+        match Unix.fork () with
+        | 0 ->
+            (try
+              if i <> Unix.stdin then begin
+                Unix.dup2 i Unix.stdin;
+                Unix.close i
+              end;
+              if o <> Unix.stdout then begin
+                Unix.dup2 o Unix.stdout;
+                Unix.close o
+              end;
+              if e <> Unix.stderr then begin
+                Unix.dup2 e Unix.stderr;
+                Unix.close e
+              end;
+              List.iter (fun fd -> try Unix.close fd with _ -> ()) close_in_child;
+              let promise = run_builtin env argv in
+              let code = match Lwt.state promise with
+                | Lwt.Return n -> n
+                | Lwt.Fail _   -> 1
+                | Lwt.Sleep    ->
+                    Printf.eprintf
+                      "ocash: builtin '%s' en pipe requiere I/O async — no soportado\n%!"
+                      prog;
+                    1
+              in
+              exit code
+            with exn ->
+              Printf.eprintf "ocash: builtin error: %s\n%!" (Printexc.to_string exn);
+              exit 1)
+        | pid ->
+            close_in_parent ();
+            let* (_, status) = Lwt_unix.waitpid [] pid in
+            let code = match status with
+              | Unix.WEXITED n -> n
+              | Unix.WSIGNALED _ -> 130
+              | Unix.WSTOPPED _ -> 128
+            in
+            last_exit_code := code;
+            Lwt.return code
+      end else begin
+        match find_in_path prog with
+        | None ->
+            close_in_parent ();
+            Printf.eprintf "ocash: %s: comando no encontrado\n%!" prog;
+            Lwt.return 127
+        | Some full_path ->
+            let pid = Unix.create_process full_path
+              (Array.of_list argv) i o e
+            in
+            close_in_parent ();
+            let* (_, status) = Lwt_unix.waitpid [] pid in
+            let code = match status with
+              | Unix.WEXITED n   -> n
+              | Unix.WSIGNALED _ -> 130
+              | Unix.WSTOPPED _  -> 128
+            in
+            last_exit_code := code;
+            Lwt.return code
+      end
 
-let rec run_pipeline env pipeline stdin_fd stdout_fd =
+(* Recorre el pipeline y devuelve un promise por cada etapa,
+   garantizando que cada child cierra los pipe fds que no necesita. *)
+let run_pipeline env pipeline =
+  let rec aux p stdin_fd stdout_fd close_in_child =
+    match p with
+    | Ast.Single cmd ->
+        let argv = List.map (expand_vars env) cmd.Ast.argv in
+        spawn_command env argv cmd.Ast.redirects
+          stdin_fd stdout_fd close_in_child
+    | Ast.Pipe (left, right) ->
+        let (pipe_r, pipe_w) = Unix.pipe ~cloexec:true () in
+        (* left escribe a pipe_w; debe cerrar pipe_r (extremo de lectura del padre).
+           right lee de pipe_r; debe cerrar pipe_w (extremo de escritura del padre). *)
+        let left_t  = aux left  stdin_fd pipe_w (pipe_r :: close_in_child) in
+        let right_t = aux right pipe_r stdout_fd (pipe_w :: close_in_child) in
+        (* En el padre cerramos ambos extremos: los children ya tienen sus copias. *)
+        (try Unix.close pipe_w with _ -> ());
+        (try Unix.close pipe_r with _ -> ());
+        let* _ = left_t in
+        let* code = right_t in
+        Lwt.return code
+  in
   match pipeline with
   | Ast.Single cmd ->
+      (* Single sin pipe: builtins corren in-process para que cd/export
+         afecten al padre. Redirects via apply/restore globales. *)
       let argv = List.map (expand_vars env) cmd.Ast.argv in
       (match argv with
        | [] -> Lwt.return 0
-       | prog :: _ ->
-           if List.mem prog builtins then begin
-             let saved = apply_redirects cmd.Ast.redirects in
-             let* code = run_builtin env argv in
-             restore_redirects saved;
-             Lwt.return code
-           end else begin
-             let saved = apply_redirects cmd.Ast.redirects in
-             let* code = run_external env argv stdin_fd stdout_fd in
-             restore_redirects saved;
-             Lwt.return code
-           end)
-  | Ast.Pipe (left, right) ->
-      let (pipe_r, pipe_w) = Unix.pipe () in
-      let* _  = run_pipeline env left  stdin_fd pipe_w in
-      Unix.close pipe_w;
-      let* code = run_pipeline env right pipe_r stdout_fd in
-      Unix.close pipe_r;
-      Lwt.return code
+       | prog :: _ when List.mem prog builtins ->
+           let saved = apply_redirects cmd.Ast.redirects in
+           Lwt.finalize
+             (fun () -> run_builtin env argv)
+             (fun () -> restore_redirects saved; Lwt.return ())
+       | _ ->
+           aux pipeline Unix.stdin Unix.stdout [])
+  | Ast.Pipe _ -> aux pipeline Unix.stdin Unix.stdout []
 
 let rec eval_statement env stmt =
   match stmt with
@@ -186,7 +281,7 @@ let rec eval_statement env stmt =
       Hashtbl.replace env k v';
       Lwt.return 0
   | Ast.Exec p ->
-      run_pipeline env p Unix.stdin Unix.stdout
+      run_pipeline env p
   | Ast.And (a, b) ->
       let* code = eval_statement env a in
       if code = 0 then eval_statement env b

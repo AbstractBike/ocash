@@ -1,0 +1,40 @@
+opam-version: "2.0"
+synopsis: "Shell OCaml interactiva con AI local + Ansible + JIT unikernel"
+description: """
+ocash es una shell Unix escrita en OCaml con:
+- Compatibilidad bash automática (fallback a `bash -c` para construcciones complejas)
+- Backends AI configurables: local llama-server, Claude CLI, Codex CLI,
+  Anthropic API, OpenAI API.
+- Modo `habla:` para queries en español → comandos shell
+- Modo `ç` con historial como contexto
+- Autocomplete ghost-text fish-style usando historial + AI
+- Builtin Ansible (playbook, ping, run, hosts, inventory)
+- Compilador OCaml embebido (`ml:` para evaluar in-process, `ocaml compile/build`)
+- Self-correction tras comandos/OCaml fallidos
+- Multi-turn conversation
+- Historial persistente con búsqueda fuzzy (hsearch)
+- Unikernel companion JIT que compila handlers OCaml en runtime
+"""
+maintainer: ["AbstractBike <abstractbike@example.com>"]
+authors: ["AbstractBike"]
+homepage: "https://github.com/AbstractBike/ocash"
+bug-reports: "https://github.com/AbstractBike/ocash/issues"
+dev-repo: "git+https://github.com/AbstractBike/ocash.git"
+depends: [
+  "ocaml" {>= "4.14"}
+  "dune" {>= "3.12"}
+  "lwt" {>= "5.7"}
+  "lwt_ppx"
+  "lambda-term" {>= "3.2"}
+  "angstrom" {>= "0.16"}
+  "cohttp-lwt-unix" {>= "5.0"}
+  "yojson"
+  "conf-libev"
+]
+depopts: [
+  "ocamlfind"
+]
+build: [
+  ["dune" "subst"] {dev}
+  ["dune" "build" "-p" name "-j" jobs]
+]

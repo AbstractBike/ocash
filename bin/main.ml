@@ -100,12 +100,19 @@ let handle_nl ?(with_history=false) env input =
     else Readline.strip_nl_prefix input
   in
   let history_ctx = if with_history then last_history_entries 8 else [] in
-  Printf.printf "%s⟳ pensando%s%s...%s\r%!"
+  (* RAG: si OCASH_RAG=1, augmenta query con snippets del proyecto *)
+  let rag_on = match Sys.getenv_opt "OCASH_RAG" with
+    | Some ("1" | "true" | "on" | "yes") -> true
+    | _ -> false
+  in
+  let augmented_query = if rag_on then Ocash_lib.Rag.augment ~query else query in
+  Printf.printf "%s⟳ pensando%s%s%s...%s\r%!"
     Readline.c_yellow
     (if with_history then " (con contexto)" else "")
+    (if rag_on then " (con RAG)" else "")
     "" Readline.c_reset;
   Ai.conv_add_user query;
-  let* result = Ai.query ~history:history_ctx ~multi_turn:true ~user_input:query () in
+  let* result = Ai.query ~history:history_ctx ~multi_turn:true ~user_input:augmented_query () in
   print_string "                    \r";
   match result with
   | Ai.Disabled ->

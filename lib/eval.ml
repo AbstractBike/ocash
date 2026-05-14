@@ -11,7 +11,22 @@ let create_env () : env =
   ) (Unix.environment ());
   t
 
-let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"; "hsearch"]
+let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"; "hsearch"; "alias"; "unalias"; "source"; "."]
+
+(* Tabla de aliases mutables. expand_alias se aplica al primer token. *)
+let aliases : (string, string) Hashtbl.t = Hashtbl.create 32
+
+let expand_alias argv =
+  match argv with
+  | [] -> argv
+  | head :: rest ->
+      (match Hashtbl.find_opt aliases head with
+       | Some expanded ->
+           (* expanded puede ser "ls -la --color=auto"; split por espacios *)
+           let parts = String.split_on_char ' ' expanded
+             |> List.filter (fun s -> s <> "") in
+           parts @ rest
+       | None -> argv)
 
 let expand_vars env s =
   let buf = Buffer.create (String.length s) in
@@ -45,6 +60,10 @@ let expand_vars env s =
   Buffer.contents buf
 
 let last_exit_code = ref 0
+
+(* Forward-reference para que `source` pueda re-entrar al eval. *)
+let eval_statement_ref : (Ast.statement -> int Lwt.t) ref =
+  ref (fun _ -> Lwt.return 0)
 
 let run_builtin env argv =
   match argv with
@@ -81,6 +100,68 @@ let run_builtin env argv =
   | "history" :: _ ->
       List.iteri (fun i s -> Printf.printf "%5d  %s\n" (i+1) s) (History.all ());
       Lwt.return 0
+  | ["alias"] ->
+      Hashtbl.iter (fun k v -> Printf.printf "alias %s='%s'\n" k v) aliases;
+      Lwt.return 0
+  | "alias" :: rest ->
+      (* `alias name=value` o `alias name='value with spaces'` *)
+      List.iter (fun spec ->
+        match String.index_opt spec '=' with
+        | None ->
+            (match Hashtbl.find_opt aliases spec with
+             | Some v -> Printf.printf "alias %s='%s'\n" spec v
+             | None -> Printf.eprintf "ocash: alias: %s: no encontrado\n%!" spec)
+        | Some i ->
+            let name = String.sub spec 0 i in
+            let value = String.sub spec (i+1) (String.length spec - i - 1) in
+            let value =
+              if String.length value >= 2 && value.[0] = '\''
+                 && value.[String.length value - 1] = '\''
+              then String.sub value 1 (String.length value - 2)
+              else if String.length value >= 2 && value.[0] = '"'
+                      && value.[String.length value - 1] = '"'
+              then String.sub value 1 (String.length value - 2)
+              else value
+            in
+            Hashtbl.replace aliases name value
+      ) rest;
+      Lwt.return 0
+  | "unalias" :: names ->
+      List.iter (Hashtbl.remove aliases) names;
+      Lwt.return 0
+  | ("source" | ".") :: file :: _ ->
+      let expanded = expand_vars env file in
+      let path =
+        if String.length expanded > 1 && String.sub expanded 0 2 = "~/" then
+          let home = try Sys.getenv "HOME" with Not_found -> "" in
+          home ^ String.sub expanded 1 (String.length expanded - 1)
+        else expanded
+      in
+      if not (Sys.file_exists path) then begin
+        Printf.eprintf "ocash: source: %s: no existe\n%!" path;
+        Lwt.return 1
+      end else begin
+        let ic = open_in path in
+        let rec loop_lines () =
+          match input_line ic with
+          | exception End_of_file -> Lwt.return 0
+          | line ->
+              let line = String.trim line in
+              if line = "" || String.length line > 0 && line.[0] = '#'
+              then loop_lines ()
+              else begin
+                match Parser.parse line with
+                | Ok stmt ->
+                    let* _ = !eval_statement_ref stmt in
+                    loop_lines ()
+                | Error _ -> loop_lines ()
+              end
+        in
+        let* code = loop_lines () in
+        close_in ic;
+        Lwt.return code
+      end
+  (* time se maneja en main.ml para envolver el pipeline completo *)
   | "hsearch" :: rest ->
       let q = String.concat " " rest in
       let matches = History.fuzzy_search ~limit:20 q in
@@ -250,6 +331,7 @@ let run_pipeline env pipeline =
     match p with
     | Ast.Single cmd ->
         let argv = List.map (expand_vars env) cmd.Ast.argv in
+        let argv = expand_alias argv in
         spawn_command env argv cmd.Ast.redirects
           stdin_fd stdout_fd close_in_child
     | Ast.Pipe (left, right) ->
@@ -275,13 +357,16 @@ let run_pipeline env pipeline =
        | prog :: _ when List.mem prog builtins ->
            let saved = apply_redirects cmd.Ast.redirects in
            Lwt.finalize
-             (fun () -> run_builtin env argv)
+             (fun () -> run_builtin env (expand_alias argv))
              (fun () -> restore_redirects saved; Lwt.return ())
        | _ ->
            aux pipeline Unix.stdin Unix.stdout [])
   | Ast.Pipe _ -> aux pipeline Unix.stdin Unix.stdout []
 
-let rec eval_statement env stmt =
+let rec eval_statement (env : env) (stmt : Ast.statement) : int Lwt.t =
+  eval_statement_ref := (fun s -> eval_statement env s);
+  eval_statement_internal env stmt
+and eval_statement_internal env stmt =
   match stmt with
   | Ast.Empty      -> Lwt.return 0
   | Ast.Assign (k, v) ->
@@ -299,10 +384,10 @@ let rec eval_statement env stmt =
       if code <> 0 then eval_statement env b
       else Lwt.return code
   | Ast.Seq (a, b) ->
-      let* _ = eval_statement env a in
-      eval_statement env b
+      let* _ = eval_statement_internal env a in
+      eval_statement_internal env b
   | Ast.Background stmt ->
       Lwt.async (fun () ->
-        let* _ = eval_statement env stmt in
+        let* _ = eval_statement_internal env stmt in
         Lwt.return ());
       Lwt.return 0

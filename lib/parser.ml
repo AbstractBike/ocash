@@ -15,7 +15,12 @@ let quoted_double =
 let quoted_single =
   char '\'' *> take_while (fun c -> c <> '\'') <* char '\''
 
-let token = quoted_double <|> quoted_single <|> word
+(* Un token es la concatenación de uno o más atoms (word|quoted) sin espacio
+   entre ellos. Permite parsear correctamente `alias l="ls -la"` como un
+   solo argumento "l=ls -la", a la bash. *)
+let token =
+  let atom = quoted_double <|> quoted_single <|> word in
+  many1 atom >>| String.concat ""
 
 let redirect_append = string ">>" *> spaces *> word >>| fun f -> Ast.Append_to f
 let redirect_stdout = char '>'   *> spaces *> word >>| fun f -> Ast.Stdout_to f

@@ -53,6 +53,24 @@ let c_dim    = "\027[2m"
 
 let color c s = c ^ s ^ c_reset
 
+(* Devuelve (branch, dirty) si estamos en un repo git, None si no. *)
+let git_info () =
+  try
+    let read_first_line cmd =
+      let ic = Unix.open_process_in cmd in
+      let line = try input_line ic with End_of_file -> "" in
+      ignore (Unix.close_process_in ic);
+      String.trim line
+    in
+    let inside = read_first_line "git rev-parse --is-inside-work-tree 2>/dev/null" in
+    if inside <> "true" then None
+    else begin
+      let branch = read_first_line "git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null" in
+      let dirty = read_first_line "git status --porcelain 2>/dev/null | head -1" in
+      Some (branch, dirty <> "")
+    end
+  with _ -> None
+
 let build_prompt () =
   let user = Option.value ~default:"user" (Sys.getenv_opt "USER") in
   let cwd  =
@@ -64,18 +82,25 @@ let build_prompt () =
     else full
   in
   let count =
-    try
-      let entries = Sys.readdir "." in
-      Array.length entries
-    with _ -> 0
+    try Array.length (Sys.readdir ".") with _ -> 0
   in
   let ai_badge =
     if !Ai.ai_enabled then color c_cyan " [AI]" else ""
   in
-  Printf.sprintf "%s%s %s %s{%d}%s%s $ "
+  let git_badge = match git_info () with
+    | Some (branch, dirty) ->
+        Printf.sprintf " %s(%s%s%s%s)%s"
+          c_dim
+          c_yellow branch c_reset
+          (if dirty then color c_red "*" else "")
+          c_reset
+    | None -> ""
+  in
+  Printf.sprintf "%s%s %s%s %s{%d}%s%s $ "
     (color c_green user)
     ai_badge
     (color c_blue cwd)
+    git_badge
     c_dim count c_reset
     c_bold
 

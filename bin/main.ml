@@ -42,9 +42,29 @@ let maybe_self_correct env =
     | _ -> Lwt.return ()
   end
 
+(* Wrapper de `time cmd ...`: mide y reporta wall/user/sys. *)
+let eval_line_timed env line =
+  let t0 = Unix.gettimeofday () in
+  let tms0 = Unix.times () in
+  let* code = match Ocash_lib.Parser.parse line with
+    | Ok s -> Ocash_lib.Eval.eval_statement env s
+    | Error _ -> Lwt.return 1
+  in
+  let t1 = Unix.gettimeofday () in
+  let tms1 = Unix.times () in
+  Printf.eprintf "\nreal\t%.3fs\nuser\t%.3fs\nsys\t%.3fs\n%!"
+    (t1 -. t0)
+    (tms1.tms_cutime -. tms0.tms_cutime)
+    (tms1.tms_cstime -. tms0.tms_cstime);
+  Lwt.return code
+
 let eval_line env line =
   last_line := line;
   add_history line;
+  (* Prefijo `time `: medir el resto del pipeline *)
+  if String.length line > 5 && String.sub line 0 5 = "time " then
+    eval_line_timed env (String.sub line 5 (String.length line - 5))
+  else
   (* Fallback a bash si el input usa construcciones que ocash no parsea
      nativamente (if/for/$()/&&/;/[[ ]]/heredocs/glob/tilde/...). *)
   if Ocash_lib.Bash.needs_bash line then begin
@@ -156,6 +176,17 @@ let () =
     if interactive then banner ();
     let env = Ocash_lib.Eval.create_env () in
     let* () = Ocash_lib.Ai.init () in
+    (* Cargar ~/.ocashrc si existe *)
+    let rc = Filename.concat
+      (try Sys.getenv "HOME" with Not_found -> "/tmp") ".ocashrc" in
+    let* () =
+      if Sys.file_exists rc then
+        let stmt = match Ocash_lib.Parser.parse (Printf.sprintf "source %s" rc) with
+          | Ok s -> s | Error _ -> Ocash_lib.Ast.Empty in
+        let* _ = Ocash_lib.Eval.eval_statement env stmt in
+        Lwt.return ()
+      else Lwt.return ()
+    in
     let rec loop () =
       let history_ctx = last_history_entries 8 in
       let* input_opt = Ocash_lib.Readline.read_input ~history:history_ctx () in

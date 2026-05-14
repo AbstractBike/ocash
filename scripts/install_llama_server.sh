@@ -32,10 +32,23 @@ elif command -v nvidia-smi &>/dev/null || [ -e /dev/nvidia0 ]; then
         | awk -F. 'NF==2 {printf "%s%d%d", (NR>1?";":""), $1, $2}')
     fi
     if [ -z "$arch_list" ]; then
-      # Fallback: arquitecturas modernas soportadas por CUDA 11/12.
-      # Volta(70) Turing(75) Ampere(80/86) Ada(89) Hopper(90).
-      arch_list="70;75;80;86;89;90"
-      echo "  (no se pudo detectar compute_cap; usando default $arch_list)"
+      # Fallback: arquitecturas modernas, recortadas a lo que el nvcc detectado
+      # soporta. Sin recortar, nvcc 11.5 falla con
+      # "Unsupported gpu architecture 'compute_89'".
+      #   CUDA 11.0-11.4  → hasta compute_80 (Ampere A100)
+      #   CUDA 11.5-11.7  → hasta compute_86 (Ampere consumer)
+      #   CUDA 11.8       → suma 89 (Ada) y 90 (Hopper)
+      #   CUDA 12.x       → 75;80;86;89;90 (todos modernos)
+      nvcc_ver_probe=$(nvcc --version 2>/dev/null \
+        | sed -nE 's/.*release ([0-9]+)\.([0-9]+).*/\1.\2/p' | head -1)
+      case "$nvcc_ver_probe" in
+        11.0|11.1|11.2|11.3|11.4) arch_list="70;75;80" ;;
+        11.5|11.6|11.7)           arch_list="70;75;80;86" ;;
+        11.8)                     arch_list="70;75;80;86;89;90" ;;
+        12.*)                     arch_list="75;80;86;89;90" ;;
+        *)                        arch_list="70;75;80;86" ;;  # conservador
+      esac
+      echo "  (no se pudo detectar compute_cap; usando default $arch_list para CUDA $nvcc_ver_probe)"
     else
       echo "  compute capabilities detectadas: $arch_list"
     fi
@@ -163,7 +176,11 @@ cmake --build build -j"$JOBS" --target llama-server
 
 # Install
 echo "→ Installing a $INSTALL_DIR"
-$SUDO cp build/bin/llama-server "$INSTALL_DIR/"
+$SUDO cp build/bin/llama-server "$INSTALL_DIR/llama-server"
+# cp normalmente preserva el bit ejecutable, pero un sistema con umask raro o
+# un destino existente con permisos restrictivos puede dejarlo sin +x — caso
+# en el que llama-server queda "Permission denied" tras instalar. Forzamos +x.
+$SUDO chmod 0755 "$INSTALL_DIR/llama-server"
 # Copia shared libs ggml si existen (algunas distros llama.cpp las compilan así)
 for so in build/bin/*.so*; do
   [ -f "$so" ] && $SUDO cp "$so" "$INSTALL_DIR/../lib/" 2>/dev/null || true

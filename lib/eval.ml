@@ -11,7 +11,7 @@ let create_env () : env =
   ) (Unix.environment ());
   t
 
-let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"]
+let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"]
 
 let expand_vars env s =
   let buf = Buffer.create (String.length s) in
@@ -80,6 +80,8 @@ let run_builtin env argv =
       Lwt.return 0
   | "ansible" :: rest ->
       Ansible.dispatch rest
+  | "ocaml" :: rest ->
+      Ocaml_eval.dispatch rest
   | _ ->
       Lwt.return 127
 

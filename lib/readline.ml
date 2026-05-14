@@ -354,14 +354,21 @@ let fuzzy_picker ~term ~initial_query : string option Lwt.t =
       loop ())
     (fun () -> LTerm.leave_raw_mode term mode)
 
-(* REPL "tonto" para modo no-TTY (scripts, pipes, CI). *)
-let read_input_dumb ~with_prompt () =
+(* REPL "tonto" para modo no-TTY (scripts, pipes, CI). Reintenta tras
+   EINTR (e.g. SIGINT entrega y vuelve), para no morir si el usuario
+   manda Ctrl-C al proceso. *)
+let rec read_input_dumb ~with_prompt () =
   if with_prompt then begin
     print_string (build_prompt ());
     flush stdout
   end;
   try Lwt.return_some (input_line stdin)
-  with End_of_file -> Lwt.return_none
+  with
+  | End_of_file -> Lwt.return_none
+  | Sys_error _ ->
+      (* Probable EINTR por señal interrumpiendo input_line.
+         Reintenta sin reimprimir prompt. *)
+      read_input_dumb ~with_prompt:false ()
 
 let is_tty = lazy (try Unix.isatty Unix.stdin with _ -> false)
 

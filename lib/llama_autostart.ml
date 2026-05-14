@@ -89,7 +89,10 @@ let start_if_needed ~url =
           Unix.close log_fd;
           llama_pid := Some pid;
           at_exit kill_on_exit;
-          (* Espera hasta 30s a que /health responda *)
+          (* Espera hasta OCASH_LLAMA_TIMEOUT s (default 90) a que /health responda.
+             Modelos grandes en CPU pueden tardar más de 30s en cargar. *)
+          let timeout = try int_of_string (Sys.getenv "OCASH_LLAMA_TIMEOUT")
+                        with _ -> 90 in
           let rec wait_ready n =
             if n <= 0 then Lwt.return false
             else
@@ -104,8 +107,10 @@ let start_if_needed ~url =
                 let* () = Lwt_unix.sleep 1.0 in
                 wait_ready (n - 1)
           in
-          let* ready = wait_ready 30 in
+          let* ready = wait_ready timeout in
           if not ready then
-            Printf.eprintf "ocash: llama-server no respondió en 30s, ver %s\n%!" logfile;
+            Printf.eprintf
+              "ocash: llama-server no respondió en %ds, ver %s\n  Sube el timeout con OCASH_LLAMA_TIMEOUT=N\n%!"
+              timeout logfile;
           Lwt.return ready
         end

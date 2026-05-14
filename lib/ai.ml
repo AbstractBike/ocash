@@ -311,6 +311,17 @@ let conv_path () =
   let home = try Sys.getenv "HOME" with Not_found -> "." in
   Filename.concat home ".ocash/conv.json"
 
+(* Escritura atómica: write a tmp + rename. Evita corrupción si crashea
+   mid-write o si dos procesos escriben a la vez. *)
+let write_atomic path content =
+  let tmp = Printf.sprintf "%s.tmp.%d" path (Unix.getpid ()) in
+  let oc = open_out tmp in
+  (try
+     output_string oc content;
+     close_out oc
+   with e -> (try close_out_noerr oc; Sys.remove tmp with _ -> ()); raise e);
+  Sys.rename tmp path
+
 let conv_save () =
   try
     let path = conv_path () in
@@ -319,9 +330,7 @@ let conv_save () =
        try Unix.mkdir dir 0o755 with _ -> ());
     let json = `List (List.map (fun (role, msg) ->
       `Assoc [("role", `String role); ("content", `String msg)]) !conversation) in
-    let oc = open_out path in
-    output_string oc (Yojson.Basic.to_string json);
-    close_out oc
+    write_atomic path (Yojson.Basic.to_string json)
   with _ -> ()  (* fallo silencioso: no rompemos UX por persistencia *)
 
 let conv_load () =

@@ -1,0 +1,8 @@
+; Configuración por profile.
+; - dev      (default): build normal
+; - release  : build optimizado
+(env
+ (dev
+  (flags (:standard)))
+ (release
+  (flags (:standard))))

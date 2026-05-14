@@ -48,8 +48,8 @@ let compile_bytecode src =
   init ();
   try
     let prefix = Filename.chop_extension src in
-    Compile.implementation ~start_from:Compiler_pass.Parsing
-      ~source_file:src ~output_prefix:prefix ();
+    Compile.implementation ~start_from:Clflags.Compiler_pass.Parsing
+      ~source_file:src ~output_prefix:prefix;
     Printf.printf "ocash[ocaml]: %s.cmo generado\n%!" prefix;
     0
   with exn ->

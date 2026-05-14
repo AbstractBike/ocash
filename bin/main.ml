@@ -234,22 +234,35 @@ let handle_argv () =
     exit 0
   end
 
-(* Restaura el terminal cuando ocash muere abruptamente (Sys.Break,
-   uncaught exn, etc). Sin esto, lambda-term puede dejar el TTY en raw
-   mode y el shell padre muestra el prompt con escapes literales. *)
+(* Restaura el terminal a un estado conocido. Lambda-term deja varios
+   modos activos (alt-screen, bracketed paste, application keypad...)
+   que confunden al shell padre haciendo que escape codes se vean
+   literales en su prompt. Cubrimos todos los modos comunes. *)
 let reset_terminal () =
-  print_string "\027[?1049l";  (* salir alt screen si entró *)
-  print_string "\027[?25h";    (* mostrar cursor *)
-  print_string "\027[0m";      (* reset attrs/color *)
+  let seqs = [
+    "\027[0m";       (* SGR reset: colores/bold/dim *)
+    "\027[?25h";     (* DECTCEM: cursor visible *)
+    "\027[?1049l";   (* alt-screen off *)
+    "\027[?47l";     (* alt-screen viejo off *)
+    "\027[?2004l";   (* bracketed paste off *)
+    "\027[?1l";      (* DECCKM: cursor keys normal *)
+    "\027[?7h";      (* DECAWM: autowrap on *)
+    "\027>";         (* DECPNM: keypad normal *)
+    "\027(B";        (* G0 = USASCII *)
+    "\027[!p";       (* DECSTR: soft reset *)
+  ] in
+  List.iter print_string seqs;
   flush stdout;
-  (* Si stdin es TTY, restaurar modo canónico vía stty (best-effort) *)
-  if Unix.isatty Unix.stdin then
-    try
+  if Unix.isatty Unix.stdin then begin
+    (try
       let attr = Unix.tcgetattr Unix.stdin in
-      let attr = { attr with
-        c_icanon = true; c_echo = true; c_isig = true } in
-      Unix.tcsetattr Unix.stdin Unix.TCSAFLUSH attr
-    with _ -> ()
+      Unix.tcsetattr Unix.stdin Unix.TCSAFLUSH
+        { attr with c_icanon = true; c_echo = true; c_isig = true;
+                    c_ixon = true; c_brkint = true }
+    with _ -> ());
+    (* Fallback nuclear: stty sane resetea TODO. Best-effort. *)
+    (try ignore (Sys.command "stty sane 2>/dev/null") with _ -> ())
+  end
 
 let () =
   handle_argv ();

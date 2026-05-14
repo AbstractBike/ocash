@@ -35,14 +35,20 @@ module Metrics = struct
       let path = persist_file () in
       let dir = Filename.dirname path in
       if not (Sys.file_exists dir) then Unix.mkdir dir 0o755;
-      let oc = open_out path in
-      Printf.fprintf oc "queries_total %d\n" !queries_total;
-      Printf.fprintf oc "cache_hits %d\n" !cache_hits;
-      Printf.fprintf oc "cache_misses %d\n" !cache_misses;
-      Printf.fprintf oc "llm_failures %d\n" !llm_failures;
-      Printf.fprintf oc "handlers_compiled %d\n" !handlers_compiled;
-      Printf.fprintf oc "compile_errors %d\n" !compile_errors;
-      close_out oc
+      (* Escritura atómica: write tmp + rename, evita corrupción si crashea
+         mid-write o si dos procesos compiten. *)
+      let tmp = Printf.sprintf "%s.tmp.%d" path (Unix.getpid ()) in
+      let oc = open_out tmp in
+      (try
+         Printf.fprintf oc "queries_total %d\n" !queries_total;
+         Printf.fprintf oc "cache_hits %d\n" !cache_hits;
+         Printf.fprintf oc "cache_misses %d\n" !cache_misses;
+         Printf.fprintf oc "llm_failures %d\n" !llm_failures;
+         Printf.fprintf oc "handlers_compiled %d\n" !handlers_compiled;
+         Printf.fprintf oc "compile_errors %d\n" !compile_errors;
+         close_out oc
+       with e -> (try close_out_noerr oc; Sys.remove tmp with _ -> ()); raise e);
+      Sys.rename tmp path
     with _ -> ()
 
   let load () =
@@ -352,14 +358,24 @@ let ensure_dir d =
 
 let next_handler_id () =
   ensure_dir handlers_dir;
-  let n = Array.length (Sys.readdir handlers_dir) in
+  (* Solo cuenta .ml válidos: ignora .tmp.* (escrituras interrumpidas) y
+     .banned (rechazados por el sandbox) para no inflar el id. *)
+  let files = Sys.readdir handlers_dir in
+  let n = Array.fold_left (fun acc f ->
+    if Filename.check_suffix f ".ml" then acc + 1 else acc) 0 files in
   Printf.sprintf "h_%03d" n
 
 let save_handler_source name code =
   let path = Filename.concat handlers_dir (name ^ ".ml") in
-  let oc = open_out path in
-  output_string oc code;
-  close_out oc;
+  (* Escritura atómica: el handler nunca debe quedar parcialmente escrito,
+     porque load_persisted_handlers lo lee y compila al reinicio. *)
+  let tmp = Printf.sprintf "%s.tmp.%d" path (Unix.getpid ()) in
+  let oc = open_out tmp in
+  (try
+     output_string oc code;
+     close_out oc
+   with e -> (try close_out_noerr oc; Sys.remove tmp with _ -> ()); raise e);
+  Sys.rename tmp path;
   path
 
 let load_persisted_handlers () =

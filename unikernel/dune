@@ -1,0 +1,16 @@
+(executable
+ (name uni)
+ (libraries
+  uni_lib
+  lwt lwt.unix
+  cohttp-lwt-unix
+  yojson
+  str
+  unix
+  compiler-libs
+  compiler-libs.common
+  compiler-libs.bytecomp
+  compiler-libs.toplevel
+  dynlink)
+ (modes (byte exe))
+ (link_flags (:standard -linkall)))

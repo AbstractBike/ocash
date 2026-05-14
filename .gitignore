@@ -2,3 +2,6 @@ _build/
 dist/
 *.install
 .merlin
+# unikernel JIT handlers cache (sí queremos commitear los .ml semilla
+# si los hubiera, pero no los generados runtime)
+.ocash/

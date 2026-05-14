@@ -76,6 +76,26 @@ user $ MY=hola; bash -c 'echo $MY'         # MY se sincroniza a env
 Lo nativo es más rápido (sin fork+exec de bash); el fallback se
 activa solo cuando es necesario.
 
+## ocash-ai-unikernel (JIT de NL→shell)
+
+`unikernel/` contiene un servidor HTTP que **compila handlers OCaml
+en runtime** generados por el LLM. La primera vez que llega una query
+nueva se invoca al LLM para producir un handler `string -> string option`,
+se compila vía `compiler-libs.toplevel`, se cachea, y se persiste en
+`~/.ocash/handlers/h_NNN.ml`. Queries similares posteriores hit el cache
+en microsegundos sin tocar el LLM.
+
+```bash
+# Arquitectura: ocash → unikernel(8081, JIT) → llama-server(8080, LLM)
+dune build unikernel/uni.exe
+llama-server -m models/model.gguf --port 8080 &
+PORT=8081 UPSTREAM_LLM=http://localhost:8080 \
+  ./_build/default/unikernel/uni.exe &
+OCASH_AI_URL=http://localhost:8081 ./_build/default/bin/main.exe
+```
+
+Ver `unikernel/README.md` para detalles y plan de port a MirageOS.
+
 ## OCaml embebido
 
 `ocash` lleva el compilador OCaml dentro (`compiler-libs.toplevel` +

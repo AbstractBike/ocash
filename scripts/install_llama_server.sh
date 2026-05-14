@@ -38,33 +38,43 @@ if command -v nvidia-smi &>/dev/null || [ -e /dev/nvidia0 ]; then
     fi
     CUDA_ARCH_FLAG="-DCMAKE_CUDA_ARCHITECTURES=$arch_list -DCMAKE_CUDA_FLAGS=-Wno-deprecated-gpu-targets"
 
-    # gcc 11+ con CUDA <= 11.4 falla en std_function.h con
-    # "parameter packs not expanded with '...'". Si nvcc es viejo y el g++ por
-    # defecto es nuevo, escoge un g++ compatible como host compiler.
-    nvcc_major_minor=$(nvcc --version 2>/dev/null \
+    # gcc 11+ frente a nvcc viejo (<= 11.4) o ciertos combos nvcc 11.5–11.8 / gcc 12+
+    # falla en std_function.h con "parameter packs not expanded with '...'".
+    # Estrategia: si tenemos CUDA enabled y el g++ por defecto es 11+, intenta
+    # un g++ más viejo como host compiler. Salvo que el usuario ya haya pinneado
+    # uno vía CUDA_HOST_COMPILER, o que CUDA toolkit sea claramente nuevo (>= 12.4)
+    # y g++ <= 12 (donde no hace falta).
+    nvcc_ver=$(nvcc --version 2>/dev/null \
       | sed -nE 's/.*release ([0-9]+)\.([0-9]+).*/\1.\2/p' | head -1)
     gxx_major=$(g++ -dumpversion 2>/dev/null | cut -d. -f1)
-    needs_older_gxx=false
-    case "$nvcc_major_minor" in
-      9.*|10.*|11.0|11.1|11.2|11.3|11.4)
-        [ "${gxx_major:-0}" -ge 11 ] && needs_older_gxx=true ;;
-      11.5|11.6|11.7|11.8)
-        [ "${gxx_major:-0}" -ge 12 ] && needs_older_gxx=true ;;
-    esac
-    if $needs_older_gxx; then
-      for candidate in g++-10 g++-9 g++-8; do
+    echo "  nvcc: ${nvcc_ver:-unknown}, g++: ${gxx_major:-unknown}"
+
+    if [ -n "${CUDA_HOST_COMPILER:-}" ]; then
+      CUDA_HOST_FLAG="-DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_COMPILER"
+      echo "  usando CUDA_HOST_COMPILER=$CUDA_HOST_COMPILER (env override)"
+    elif [ "${gxx_major:-0}" -ge 11 ]; then
+      # Busca el g++ más nuevo que aún sea <= 11 (compatible con la mayoría de
+      # CUDA toolkits modernos y con todos los antiguos).
+      for candidate in g++-11 g++-10 g++-9 g++-8; do
         if command -v "$candidate" &>/dev/null; then
+          # Evita usar g++-11 si el default ya es g++-11 (mismo problema).
+          cand_major=$($candidate -dumpversion 2>/dev/null | cut -d. -f1)
+          [ "${cand_major:-99}" -ge "${gxx_major}" ] && continue
           host_cxx=$(command -v "$candidate")
           CUDA_HOST_FLAG="-DCMAKE_CUDA_HOST_COMPILER=$host_cxx"
-          echo "  nvcc $nvcc_major_minor vs g++ $gxx_major incompatible;"
-          echo "  usando $host_cxx como CUDA host compiler"
+          echo "  usando $host_cxx como CUDA host compiler (evita std_function.h bug)"
           break
         fi
       done
       if [ -z "$CUDA_HOST_FLAG" ]; then
-        echo "  ⚠ nvcc $nvcc_major_minor no soporta g++ $gxx_major y no encuentro g++-10/9/8."
-        echo "    Instala uno: sudo apt-get install -y g++-10"
-        echo "    o actualiza el CUDA toolkit a >= 12.x."
+        echo ""
+        echo "  ⚠ g++ ${gxx_major} puede ser incompatible con tu CUDA toolkit"
+        echo "    (síntoma: 'parameter packs not expanded with ...' en std_function.h)."
+        echo "    Si la compilación falla, instala un g++ más viejo:"
+        echo "      sudo apt-get install -y g++-10"
+        echo "    y vuelve a correr este script con FORCE_RECONFIGURE=1."
+        echo "    Override manual: CUDA_HOST_COMPILER=/usr/bin/g++-10 $0"
+        echo ""
       fi
     fi
   else

@@ -97,14 +97,17 @@ let banner () =
     c_bold c_reset
 
 let () =
+  let interactive = Lazy.force Ocash_lib.Readline.is_tty in
   Lwt_main.run begin
-    banner ();
+    if interactive then banner ();
     let env = Ocash_lib.Eval.create_env () in
-    let* () = Ocash_lib.Ai.init () in
+    let* () = if interactive then Ocash_lib.Ai.init () else Lwt.return () in
     let rec loop () =
       let* input_opt = Ocash_lib.Readline.read_input () in
       match input_opt with
-      | None       -> loop ()
+      | None       ->
+          (* EOF: en TTY lambda-term ya hizo exit; en no-TTY salimos limpio. *)
+          if interactive then loop () else Lwt.return ()
       | Some ""    -> loop ()
       | Some line  ->
           let* () =

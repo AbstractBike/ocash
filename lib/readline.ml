@@ -79,16 +79,30 @@ class shell_readline term completions prompt_str = object(self)
     self#set_completion 0 matches
 end
 
+(* REPL "tonto" para modo no-TTY (scripts, pipes, CI). *)
+let read_input_dumb ~with_prompt () =
+  if with_prompt then begin
+    print_string (build_prompt ());
+    flush stdout
+  end;
+  try Lwt.return_some (input_line stdin)
+  with End_of_file -> Lwt.return_none
+
+let is_tty = lazy (try Unix.isatty Unix.stdin with _ -> false)
+
 let read_input () =
-  let completions = Completion.get_all "" in
-  let prompt      = build_prompt () in
-  Lwt.catch
-    (fun () ->
-      let* term = Lazy.force LTerm.stdout in
-      let rl = new shell_readline term completions prompt in
-      let* result = rl#run in
-      Lwt.return_some (Zed_string.to_utf8 result))
-    (function
-      | LTerm_read_line.Interrupt -> Lwt.return_some ""
-      | End_of_file               -> exit 0
-      | exn                       -> Lwt.fail exn)
+  if not (Lazy.force is_tty) then
+    read_input_dumb ~with_prompt:false ()
+  else
+    let completions = Completion.get_all "" in
+    let prompt      = build_prompt () in
+    Lwt.catch
+      (fun () ->
+        let* term = Lazy.force LTerm.stdout in
+        let rl = new shell_readline term completions prompt in
+        let* result = rl#run in
+        Lwt.return_some (Zed_string.to_utf8 result))
+      (function
+        | LTerm_read_line.Interrupt -> Lwt.return_some ""
+        | End_of_file               -> exit 0
+        | exn                       -> Lwt.fail exn)

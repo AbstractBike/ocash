@@ -54,13 +54,12 @@ let build_prompt () =
     c_reset
     c_bold
 
-class shell_readline completions prompt_str = object(self)
-  inherit LTerm_read_line.read_line () as super
-  inherit [Zed_string.t] LTerm_read_line.term (Lazy.force LTerm.stdout)
+class shell_readline term completions prompt_str = object(self)
+  inherit LTerm_read_line.read_line ()
+  inherit [Zed_string.t] LTerm_read_line.term term
 
   initializer
-    self#set_prompt (React.S.const (LTerm_text.of_string prompt_str));
-    ignore completions
+    self#set_prompt (React.S.const (LTerm_text.of_utf8 prompt_str))
 
   method! show_box = false
 
@@ -77,8 +76,7 @@ class shell_readline completions prompt_str = object(self)
       |> List.map (fun s ->
           (Zed_string.of_utf8 s, Zed_string.of_utf8 ""))
     in
-    self#set_completion 0 matches;
-    ignore super
+    self#set_completion 0 matches
 end
 
 let read_input () =
@@ -86,7 +84,8 @@ let read_input () =
   let prompt      = build_prompt () in
   Lwt.catch
     (fun () ->
-      let rl = new shell_readline completions prompt in
+      let* term = Lazy.force LTerm.stdout in
+      let rl = new shell_readline term completions prompt in
       let* result = rl#run in
       Lwt.return_some (Zed_string.to_utf8 result))
     (function

@@ -10,6 +10,7 @@
   unix
   compiler-libs
   compiler-libs.common
+  compiler-libs.bytecomp
   compiler-libs.toplevel
   dynlink)
  (preprocess (pps lwt_ppx)))

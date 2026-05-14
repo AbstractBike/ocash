@@ -58,8 +58,9 @@ habla: ejecutar playbook site.yml en hosts de produccion
 
 ## OCaml embebido
 
-`ocash` lleva el compilador OCaml dentro (`compiler-libs.toplevel`).
-Evalúa expresiones in-process sin invocar `ocaml`:
+`ocash` lleva el compilador OCaml dentro (`compiler-libs.toplevel` +
+`ocamlrun` enlazado en el ejecutable). Evalúa expresiones in-process
+sin invocar `ocaml` externo:
 
 ```
 user [AI] ~/proyecto $ ml: List.map succ [1;2;3]
@@ -93,14 +94,12 @@ bash scripts/build_fatbin.sh
 tar czf ocash-fatbin.tar.gz -C dist .
 ```
 
-El script intenta linkar estáticamente (`dune build --profile static`).
-Si falta `libev.a` u otra estática, cae a build dinámico normal.
+El binario es bytecode + `ocamlrun` embebido + stdlib + `compiler-libs`
+para el toploop. Pesa ~6 MB y solo depende de `libc`/`libssl`/`libev`
+del sistema (típicamente presentes en cualquier Linux).
 
-**Nota sobre el toploop OCaml embebido + link estático**: el toploop
-usa `Dynlink` para evaluar definiciones de valor. Con `-static` esto
-puede fallar (glibc no permite `dlopen` en binarios estáticos). En
-ese caso `ml:` solo parsea y type-checkea; ejecución requiere build
-dinámico o musl + `-dynlink`.
+Para 100% estático sin libs de sistema: musl + libssl/libev estáticas
+(complicado; fuera del scope por defecto).
 
 Para link 100% estático: usa un switch opam con musl + flambda
 (`opam switch create musl 4.14.1+musl+static`) y `apt install libev-dev`.

@@ -101,7 +101,7 @@ let () =
   Lwt_main.run begin
     if interactive then banner ();
     let env = Ocash_lib.Eval.create_env () in
-    let* () = if interactive then Ocash_lib.Ai.init () else Lwt.return () in
+    let* () = Ocash_lib.Ai.init () in
     let rec loop () =
       let* input_opt = Ocash_lib.Readline.read_input () in
       match input_opt with

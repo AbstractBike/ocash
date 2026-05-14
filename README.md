@@ -56,6 +56,25 @@ habla: ejecutar playbook site.yml en hosts de produccion
 > ansible playbook site.yml --limit prod
 ```
 
+## Fatbin (binario único distribuible)
+
+```bash
+# Genera dist/ con binario estático + (opcional) llama-server + modelo
+bash scripts/build_fatbin.sh
+
+# Lanza todo desde el bundle
+./dist/launch.sh
+
+# Empaquetar para distribuir
+tar czf ocash-fatbin.tar.gz -C dist .
+```
+
+El script intenta linkar estáticamente (`dune build --profile static`).
+Si falta `libev.a` u otra estática, cae a build dinámico normal.
+
+Para link 100% estático: usa un switch opam con musl + flambda
+(`opam switch create musl 4.14.1+musl+static`) y `apt install libev-dev`.
+
 ## Variables de entorno
 
 | Variable | Default | Descripcion |

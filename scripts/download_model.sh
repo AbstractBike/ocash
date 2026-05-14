@@ -13,7 +13,17 @@ if [ -f "${MODEL_FILE}" ]; then
 fi
 
 echo "Descargando Qwen2.5-OCamler Q4_K_M (~986 MB)..."
-wget --show-progress -O "${MODEL_FILE}" "${MODEL_URL}"
+if ! wget --show-progress -O "${MODEL_FILE}" "${MODEL_URL}"; then
+  rm -f "${MODEL_FILE}"
+  echo ""
+  echo "Descarga falló (¿firewall bloqueando huggingface.co?)."
+  echo "Alternativas:"
+  echo "  1) Descarga manual desde otra máquina y copia a ${MODEL_FILE}"
+  echo "  2) Usa otro modelo GGUF compatible con llama-server:"
+  echo "     Qwen2.5-1.5B-Instruct, Phi-3-mini, Gemma-2-2b-it..."
+  echo "  3) Apunta OCASH_AI_URL a otro endpoint OpenAI-compatible"
+  exit 1
+fi
 echo "Modelo guardado en ${MODEL_FILE}"
 
 # Instalar llama.cpp si no existe

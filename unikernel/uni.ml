@@ -13,6 +13,95 @@ open Lwt.Syntax
 module Handlers = Uni
 
 (* ============================================================ *)
+(* Métricas Prometheus                                           *)
+(* ============================================================ *)
+
+module Metrics = struct
+  let queries_total = ref 0
+  let cache_hits    = ref 0
+  let cache_misses  = ref 0
+  let llm_failures  = ref 0
+  let handlers_compiled = ref 0
+  let compile_errors    = ref 0
+  let started_at        = Unix.gettimeofday ()
+  let last_query_ms     = ref 0.0
+
+  let persist_file () =
+    let home = try Sys.getenv "HOME" with Not_found -> "/tmp" in
+    Filename.concat home ".ocash/metrics.txt"
+
+  let save () =
+    try
+      let path = persist_file () in
+      let dir = Filename.dirname path in
+      if not (Sys.file_exists dir) then Unix.mkdir dir 0o755;
+      let oc = open_out path in
+      Printf.fprintf oc "queries_total %d\n" !queries_total;
+      Printf.fprintf oc "cache_hits %d\n" !cache_hits;
+      Printf.fprintf oc "cache_misses %d\n" !cache_misses;
+      Printf.fprintf oc "llm_failures %d\n" !llm_failures;
+      Printf.fprintf oc "handlers_compiled %d\n" !handlers_compiled;
+      Printf.fprintf oc "compile_errors %d\n" !compile_errors;
+      close_out oc
+    with _ -> ()
+
+  let load () =
+    let path = persist_file () in
+    if Sys.file_exists path then begin
+      try
+        let ic = open_in path in
+        (try while true do
+          let line = input_line ic in
+          match String.split_on_char ' ' line with
+          | ["queries_total"; n]     -> queries_total := int_of_string n
+          | ["cache_hits"; n]        -> cache_hits := int_of_string n
+          | ["cache_misses"; n]      -> cache_misses := int_of_string n
+          | ["llm_failures"; n]      -> llm_failures := int_of_string n
+          | ["handlers_compiled"; n] -> handlers_compiled := int_of_string n
+          | ["compile_errors"; n]    -> compile_errors := int_of_string n
+          | _ -> ()
+        done with End_of_file -> ());
+        close_in ic
+      with _ -> ()
+    end
+
+  (* Formato exposition Prometheus *)
+  let render () =
+    let uptime = Unix.gettimeofday () -. started_at in
+    let cache_size = Uni.count () in
+    Printf.sprintf
+{|# HELP ocash_uni_queries_total Total queries received
+# TYPE ocash_uni_queries_total counter
+ocash_uni_queries_total %d
+# HELP ocash_uni_cache_hits_total Total cache hits
+# TYPE ocash_uni_cache_hits_total counter
+ocash_uni_cache_hits_total %d
+# HELP ocash_uni_cache_misses_total Total cache misses
+# TYPE ocash_uni_cache_misses_total counter
+ocash_uni_cache_misses_total %d
+# HELP ocash_uni_llm_failures_total Total LLM upstream errors
+# TYPE ocash_uni_llm_failures_total counter
+ocash_uni_llm_failures_total %d
+# HELP ocash_uni_handlers_compiled_total Total handlers compiled OK
+# TYPE ocash_uni_handlers_compiled_total counter
+ocash_uni_handlers_compiled_total %d
+# HELP ocash_uni_compile_errors_total Total handler compilation failures
+# TYPE ocash_uni_compile_errors_total counter
+ocash_uni_compile_errors_total %d
+# HELP ocash_uni_cache_size Current size of handler cache
+# TYPE ocash_uni_cache_size gauge
+ocash_uni_cache_size %d
+# HELP ocash_uni_uptime_seconds Process uptime
+# TYPE ocash_uni_uptime_seconds gauge
+ocash_uni_uptime_seconds %.0f
+# HELP ocash_uni_last_query_ms Latency of last query
+# TYPE ocash_uni_last_query_ms gauge
+ocash_uni_last_query_ms %.2f
+|} !queries_total !cache_hits !cache_misses !llm_failures
+   !handlers_compiled !compile_errors cache_size uptime !last_query_ms
+end
+
+(* ============================================================ *)
 (* Toploop helper                                                *)
 (* ============================================================ *)
 
@@ -216,15 +305,26 @@ let llm_generate ~user_input =
 (* ============================================================ *)
 
 let process_query query =
+  let t0 = Unix.gettimeofday () in
+  incr Metrics.queries_total;
+  let finish result =
+    Metrics.last_query_ms := (Unix.gettimeofday () -. t0) *. 1000.0;
+    Metrics.save ();
+    result
+  in
   match Handlers.dispatch query with
   | Some cmd ->
+      incr Metrics.cache_hits;
       Printf.printf "[uni] CACHE HIT: %s → %s\n%!" query cmd;
-      Lwt.return_ok cmd
+      finish (Lwt.return_ok cmd)
   | None ->
+      incr Metrics.cache_misses;
       Printf.printf "[uni] CACHE MISS: %s → pidiendo handler al LLM\n%!" query;
       let* gen = llm_generate ~user_input:query in
       match gen with
-      | Error e -> Lwt.return_error ("LLM falló: " ^ e)
+      | Error e ->
+          incr Metrics.llm_failures;
+          finish (Lwt.return_error ("LLM falló: " ^ e))
       | Ok code ->
           let id = next_handler_id () in
           let path = save_handler_source id code in
@@ -234,14 +334,17 @@ let process_query query =
           let after = Handlers.count () in
           if not ok || after = before then begin
             (try Sys.remove path with _ -> ());
-            Lwt.return_error "compilación del handler generado falló o no registró"
-          end else
+            incr Metrics.compile_errors;
+            finish (Lwt.return_error "compilación del handler generado falló o no registró")
+          end else begin
+            incr Metrics.handlers_compiled;
             match Handlers.dispatch query with
             | Some cmd ->
                 Printf.printf "[uni] NUEVO handler aplicado: %s → %s\n%!" query cmd;
-                Lwt.return_ok cmd
+                finish (Lwt.return_ok cmd)
             | None ->
-                Lwt.return_error "handler compilado pero no encaja con la query"
+                finish (Lwt.return_error "handler compilado pero no encaja con la query")
+          end
 
 (* ============================================================ *)
 (* HTTP server (compat OpenAI /v1/chat/completions)              *)
@@ -279,6 +382,10 @@ let callback _ req body =
   | "/stats" ->
       let s = Printf.sprintf "handlers cached: %d\n" (Handlers.count ()) in
       Cohttp_lwt_unix.Server.respond_string ~status:`OK ~body:s ()
+  | "/metrics" ->
+      Cohttp_lwt_unix.Server.respond_string ~status:`OK
+        ~headers:(Cohttp.Header.of_list [("Content-Type", "text/plain; version=0.0.4")])
+        ~body:(Metrics.render ()) ()
   | "/v1/chat/completions" ->
       let* body_str = Cohttp_lwt.Body.to_string body in
       (match extract_user_msg body_str with
@@ -307,7 +414,9 @@ let () =
     Printf.printf "[uni] LLM upstream: %s\n%!" !llm_url;
     toploop_init ();
     load_persisted_handlers ();
-    Printf.printf "[uni] %d handlers cargados desde disco\n%!" (Handlers.count ());
+    Metrics.load ();
+    Printf.printf "[uni] %d handlers cargados desde disco (métricas: %d queries previas)\n%!"
+      (Handlers.count ()) !Metrics.queries_total;
     let server = Cohttp_lwt_unix.Server.make ~callback () in
     Cohttp_lwt_unix.Server.create ~mode:(`TCP (`Port port)) server
   end

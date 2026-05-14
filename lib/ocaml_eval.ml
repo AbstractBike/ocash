@@ -13,9 +13,10 @@ let init () =
     initialized := true
   end
 
-(** Evalúa una frase OCaml ("List.map succ [1;2;3]" o "let x = 42").
-    Imprime el resultado en stdout. Devuelve 0 si éxito, 1 en error. *)
-let eval_phrase code =
+(* Captura stderr durante eval para devolver mensaje de error al AI *)
+let last_error_msg = ref ""
+
+let eval_phrase_raw code =
   init ();
   let code = String.trim code in
   let code =
@@ -28,14 +29,54 @@ let eval_phrase code =
     let lexbuf = Lexing.from_string code in
     Location.init lexbuf "//ocash//";
     let phrase = !Toploop.parse_toplevel_phrase lexbuf in
-    let ok = Toploop.execute_phrase true Format.std_formatter phrase in
+    let buf = Buffer.create 256 in
+    let err_buf_formatter = Format.formatter_of_buffer buf in
+    let ok =
+      try Toploop.execute_phrase true Format.std_formatter phrase
+      with exn ->
+        Location.report_exception err_buf_formatter exn;
+        Format.pp_print_flush err_buf_formatter ();
+        last_error_msg := Buffer.contents buf;
+        false
+    in
     Format.pp_print_flush Format.std_formatter ();
+    Format.pp_print_flush err_buf_formatter ();
+    if not ok && !last_error_msg = "" then last_error_msg := Buffer.contents buf;
     if ok then 0 else 1
   with
   | Sys.Break -> 130
   | exn ->
-      Location.report_exception Format.err_formatter exn;
+      let buf = Buffer.create 256 in
+      let f = Format.formatter_of_buffer buf in
+      Location.report_exception f exn;
+      Format.pp_print_flush f ();
+      last_error_msg := Buffer.contents buf;
+      Printf.eprintf "%s%!" !last_error_msg;
       1
+
+(** Evalúa una frase OCaml ("List.map succ [1;2;3]" o "let x = 42").
+    Imprime el resultado en stdout. Devuelve 0 si éxito, 1 en error.
+    Si falla y el AI está habilitada, intenta self-correct (offering
+    al usuario un fix sugerido). *)
+let eval_phrase code =
+  last_error_msg := "";
+  eval_phrase_raw code
+
+(* Self-correct: pide al AI que arregle un fragmento OCaml roto.
+   Devuelve Some fixed_code si lo logra, None si no. *)
+let self_correct ~code ~error =
+  let open Lwt.Syntax in
+  if not !Ai.ai_enabled then Lwt.return None
+  else begin
+    let prompt = Printf.sprintf
+      "El siguiente código OCaml falla:\n```ocaml\n%s\n```\n\nError:\n%s\n\n\
+       Devuelve SOLO el código OCaml corregido (sin markdown, sin explicación)."
+      code error in
+    let* result = Ai.query ~user_input:prompt () in
+    match result with
+    | Ai.Command fixed -> Lwt.return (Some fixed)
+    | _ -> Lwt.return None
+  end
 
 (** Carga un archivo .ml dentro del toploop (equivalente a #use). *)
 let use_file path =

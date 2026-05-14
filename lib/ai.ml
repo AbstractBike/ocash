@@ -111,9 +111,31 @@ let read_all ic =
 (* Backend: Local llama-server (OpenAI-compatible)               *)
 (* ============================================================ *)
 
+(* Streaming SSE: lee "data: {...}" líneas, extrae delta.content, imprime
+   en stdout token a token. Devuelve la concatenación final. *)
+let stream_enabled () =
+  match Sys.getenv_opt "OCASH_AI_STREAM" with
+  | Some ("0" | "false" | "no" | "off") -> false
+  | _ -> true  (* default: streaming on para mejor UX *)
+
+let parse_sse_line line =
+  let line = String.trim line in
+  if String.length line < 6 || String.sub line 0 6 <> "data: " then None
+  else
+    let payload = String.sub line 6 (String.length line - 6) in
+    if payload = "[DONE]" then None
+    else
+      try
+        let json = Yojson.Basic.from_string payload in
+        let open Yojson.Basic.Util in
+        let delta = json |> member "choices" |> index 0 |> member "delta" in
+        Some (delta |> member "content" |> to_string)
+      with _ -> None
+
 let query_openai_compat ~url ~headers ~user_input =
+  let stream = stream_enabled () in
   let body = Yojson.Basic.to_string (`Assoc [
-    ("stream",      `Bool false);
+    ("stream",      `Bool stream);
     ("max_tokens",  `Int 300);
     ("temperature", `Float 0.05);
     ("messages", `List [
@@ -127,15 +149,37 @@ let query_openai_compat ~url ~headers ~user_input =
   Lwt.catch (fun () ->
     let* (_, body_resp) = Cohttp_lwt_unix.Client.post
       ~headers ~body:(Cohttp_lwt.Body.of_string body) uri in
-    let* body_str = Cohttp_lwt.Body.to_string body_resp in
-    let json = Yojson.Basic.from_string body_str in
-    let open Yojson.Basic.Util in
-    let content = json |> member "choices" |> index 0
-      |> member "message" |> member "content" |> to_string in
-    let content = strip_markdown content in
-    if String.starts_with ~prefix:"ERROR:" content
-    then Lwt.return (AiError content)
-    else Lwt.return (Command content))
+    if stream then begin
+      (* Streaming: leemos chunks, parseamos SSE, imprimimos cada delta *)
+      let buf = Buffer.create 256 in
+      let* stream_body = Cohttp_lwt.Body.to_stream body_resp |> Lwt.return in
+      let* () = Lwt_stream.iter_s (fun chunk ->
+        let lines = String.split_on_char '\n' chunk in
+        List.iter (fun line ->
+          match parse_sse_line line with
+          | Some delta when delta <> "" ->
+              Buffer.add_string buf delta;
+              print_string delta; flush stdout
+          | _ -> ()
+        ) lines;
+        Lwt.return ()
+      ) stream_body in
+      print_newline ();
+      let content = strip_markdown (Buffer.contents buf) in
+      if String.starts_with ~prefix:"ERROR:" content
+      then Lwt.return (AiError content)
+      else Lwt.return (Command content)
+    end else begin
+      let* body_str = Cohttp_lwt.Body.to_string body_resp in
+      let json = Yojson.Basic.from_string body_str in
+      let open Yojson.Basic.Util in
+      let content = json |> member "choices" |> index 0
+        |> member "message" |> member "content" |> to_string in
+      let content = strip_markdown content in
+      if String.starts_with ~prefix:"ERROR:" content
+      then Lwt.return (AiError content)
+      else Lwt.return (Command content)
+    end)
    (fun exn -> Lwt.return (AiError ("conexión fallida: " ^ Printexc.to_string exn)))
 
 (* ============================================================ *)

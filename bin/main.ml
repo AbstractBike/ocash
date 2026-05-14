@@ -203,8 +203,25 @@ let () =
               handle_nl env line
             else if Ocash_lib.Readline.is_ocaml line then begin
               let code = Ocash_lib.Readline.strip_ocaml_prefix line in
-              let _ = Ocash_lib.Ocaml_eval.eval_phrase code in
-              Lwt.return ()
+              let rc = Ocash_lib.Ocaml_eval.eval_phrase code in
+              if rc <> 0 && !Ocash_lib.Ai.ai_enabled
+                 && Lazy.force Ocash_lib.Readline.is_tty then begin
+                let err = !Ocash_lib.Ocaml_eval.last_error_msg in
+                Printf.printf "%s↳ ¿AI auto-corregir el OCaml?%s [s/N] %!"
+                  Ocash_lib.Readline.c_yellow Ocash_lib.Readline.c_reset;
+                let ans = try input_line stdin |> String.trim |> String.lowercase_ascii
+                          with End_of_file -> "n" in
+                if List.mem ans ["s"; "si"; "sí"; "y"; "yes"] then begin
+                  let* fix = Ocash_lib.Ocaml_eval.self_correct ~code ~error:err in
+                  match fix with
+                  | Some fixed ->
+                      Printf.printf "%s→ %s%s\n%!"
+                        Ocash_lib.Readline.c_cyan fixed Ocash_lib.Readline.c_reset;
+                      let _ = Ocash_lib.Ocaml_eval.eval_phrase fixed in
+                      Lwt.return ()
+                  | None -> Lwt.return ()
+                end else Lwt.return ()
+              end else Lwt.return ()
             end
             else begin
               let* _ = eval_line env line in

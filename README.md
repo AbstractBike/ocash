@@ -56,6 +56,26 @@ habla: ejecutar playbook site.yml en hosts de produccion
 > ansible playbook site.yml --limit prod
 ```
 
+## Compatibilidad con bash
+
+`ocash` parsea nativamente un subset (pipes, redirects, assigns simples,
+expansión de `$VAR`/`${VAR}`). Para cualquier construcción fuera de ese
+subset (control flow, `$()`, `&&`/`||`/`;`, glob, tilde, `[[ ]]`,
+heredocs, brace expansion, funciones, case) delega a `bash -c`
+automáticamente. Compatibilidad efectiva: 100%.
+
+```
+user $ for i in 1 2 3; do echo $i; done    # → bash -c
+user $ if [ -f foo ]; then echo si; fi     # → bash -c
+user $ ls *.ml | head -3                   # → bash -c (glob)
+user $ echo $(date +%Y)                    # → bash -c (cmd sub)
+user $ ls -la /tmp                         # → nativo (rápido)
+user $ MY=hola; bash -c 'echo $MY'         # MY se sincroniza a env
+```
+
+Lo nativo es más rápido (sin fork+exec de bash); el fallback se
+activa solo cuando es necesario.
+
 ## OCaml embebido
 
 `ocash` lleva el compilador OCaml dentro (`compiler-libs.toplevel` +

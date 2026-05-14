@@ -14,16 +14,27 @@ let add_history line =
 
 let eval_line env line =
   add_history line;
-  match Ocash_lib.Parser.parse line with
-  | Error msg ->
-      Printf.eprintf "\027[31mparse error:\027[0m %s\n%!" msg;
-      Lwt.return 1
-  | Ok stmt ->
-      Lwt.catch
-        (fun () -> Ocash_lib.Eval.eval_statement env stmt)
-        (fun exn ->
-          Printf.eprintf "\027[31merror:\027[0m %s\n%!" (Printexc.to_string exn);
-          Lwt.return 1)
+  (* Fallback a bash si el input usa construcciones que ocash no parsea
+     nativamente (if/for/$()/&&/;/[[ ]]/heredocs/glob/tilde/...). *)
+  if Ocash_lib.Bash.needs_bash line then begin
+    Ocash_lib.Bash.sync_env env;
+    Lwt.catch
+      (fun () -> Ocash_lib.Bash.run line)
+      (fun exn ->
+        Printf.eprintf "\027[31mbash error:\027[0m %s\n%!" (Printexc.to_string exn);
+        Lwt.return 1)
+  end else
+    match Ocash_lib.Parser.parse line with
+    | Error _ ->
+        (* Si el parser nativo falla, cae a bash como último recurso. *)
+        Ocash_lib.Bash.sync_env env;
+        Ocash_lib.Bash.run line
+    | Ok stmt ->
+        Lwt.catch
+          (fun () -> Ocash_lib.Eval.eval_statement env stmt)
+          (fun exn ->
+            Printf.eprintf "\027[31merror:\027[0m %s\n%!" (Printexc.to_string exn);
+            Lwt.return 1)
 
 let handle_nl env input =
   let open Ocash_lib in

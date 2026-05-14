@@ -1,0 +1,78 @@
+# ocash — Shell interactiva en OCaml con AI + Ansible
+
+Shell Unix escrita en OCaml con tres superpoderes:
+1. Integracion del modelo Qwen2.5-OCamler-1.5B para comandos en lenguaje natural.
+2. Biblioteca/builtin **Ansible** integrado (`ansible playbook ...`, `ansible ping all`).
+3. Pipes, redirects, expansion de variables, history, completion.
+
+## Quickstart
+
+```bash
+# 1. Setup y compilar
+bash scripts/setup.sh
+
+# 2. Descargar modelo AI (~986 MB)
+bash scripts/download_model.sh
+
+# 3. Iniciar servidor AI (en otra terminal)
+llama-server -m ~/.local/share/ocash/model.gguf \
+  --port 8080 --ctx-size 4096 -ngl 99
+
+# 4. Lanzar la shell
+./_build/default/bin/main.exe
+```
+
+## Uso del modo AI
+
+Antepon `habla:`, `ai:`, `?:`, `haz:`, `make:` o `di:`:
+
+```
+user [AI] ~/proyecto $ habla: cuantas lineas de OCaml tengo
+> find . -name "*.ml" | xargs wc -l | tail -1
+¿ejecutar? [S/n/e] s
+```
+
+Respuestas: `s` ejecuta, `n` cancela, `e` permite editar antes de ejecutar.
+
+## Builtin Ansible
+
+`ocash` integra un wrapper sobre el CLI de Ansible. Ejemplos:
+
+```
+ansible playbook deploy.yml --limit web --tags db -e env=prod
+ansible ping all
+ansible run web shell "uptime"
+ansible hosts web
+ansible inventory
+ansible help
+```
+
+Variable de entorno: `OCASH_ANSIBLE_INVENTORY=/path/to/hosts.ini`.
+
+Tambien funciona en modo AI:
+
+```
+habla: ejecutar playbook site.yml en hosts de produccion
+> ansible playbook site.yml --limit prod
+```
+
+## Variables de entorno
+
+| Variable | Default | Descripcion |
+|---|---|---|
+| `OCASH_AI_URL` | `http://localhost:8080` | Endpoint del llama-server |
+| `OCASH_ANSIBLE_INVENTORY` | (ninguno) | Inventory por defecto para el builtin |
+
+## Arquitectura
+
+```
+bin/main.ml         REPL principal
+lib/ast.ml          AST de la shell
+lib/parser.ml       Parser Angstrom (pipes, redirects, assigns)
+lib/eval.ml         Evaluador Lwt (fork/exec, redirects, builtins)
+lib/ansible.ml      Wrapper Ansible CLI
+lib/ai.ml           Cliente HTTP llama-server
+lib/completion.ml   Completion de paths y comandos
+lib/readline.ml     UI lambda-term + prompt + parsing NL
+```
+

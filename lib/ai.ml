@@ -118,6 +118,9 @@ let stream_enabled () =
   | Some ("0" | "false" | "no" | "off") -> false
   | _ -> true  (* default: streaming on para mejor UX *)
 
+(* Parser SSE smart: detecta formato OpenAI (choices[0].delta.content) o
+   Anthropic (type=content_block_delta, delta.text). Ignora líneas event:/
+   pings/[DONE]/JSON sin texto útil. *)
 let parse_sse_line line =
   let line = String.trim line in
   if String.length line < 6 || String.sub line 0 6 <> "data: " then None
@@ -128,8 +131,19 @@ let parse_sse_line line =
       try
         let json = Yojson.Basic.from_string payload in
         let open Yojson.Basic.Util in
-        let delta = json |> member "choices" |> index 0 |> member "delta" in
-        Some (delta |> member "content" |> to_string)
+        (* Anthropic: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}} *)
+        let typ = json |> member "type" |> to_string_option in
+        (match typ with
+         | Some "content_block_delta" ->
+             let txt = json |> member "delta" |> member "text" |> to_string_option in
+             (match txt with Some s -> Some s | None -> None)
+         | Some _ -> None  (* message_start, content_block_start, ping, etc. *)
+         | None ->
+             (* OpenAI: choices[0].delta.content *)
+             let delta = json |> member "choices" |> index 0 |> member "delta" in
+             (match delta |> member "content" |> to_string_option with
+              | Some s -> Some s
+              | None -> None))
       with _ -> None
 
 let query_openai_compat ~url ~headers ~user_input =
@@ -192,9 +206,11 @@ let query_anthropic ~user_input =
   | Some key ->
       let model = Option.value ~default:"claude-haiku-4-5-20251001"
         (Sys.getenv_opt "OCASH_AI_MODEL") in
+      let stream = stream_enabled () in
       let body = Yojson.Basic.to_string (`Assoc [
         ("model", `String model);
         ("max_tokens", `Int 300);
+        ("stream", `Bool stream);
         ("system", `String system_prompt);
         ("messages", `List [
           `Assoc [("role", `String "user"); ("content", `String user_input)]
@@ -209,15 +225,36 @@ let query_anthropic ~user_input =
       Lwt.catch (fun () ->
         let* (_, body_resp) = Cohttp_lwt_unix.Client.post
           ~headers ~body:(Cohttp_lwt.Body.of_string body) uri in
-        let* body_str = Cohttp_lwt.Body.to_string body_resp in
-        let json = Yojson.Basic.from_string body_str in
-        let open Yojson.Basic.Util in
-        let content = json |> member "content" |> index 0
-          |> member "text" |> to_string in
-        let content = strip_markdown content in
-        if String.starts_with ~prefix:"ERROR:" content
-        then Lwt.return (AiError content)
-        else Lwt.return (Command content))
+        if stream then begin
+          let buf = Buffer.create 256 in
+          let* stream_body = Cohttp_lwt.Body.to_stream body_resp |> Lwt.return in
+          let* () = Lwt_stream.iter_s (fun chunk ->
+            let lines = String.split_on_char '\n' chunk in
+            List.iter (fun line ->
+              match parse_sse_line line with
+              | Some delta when delta <> "" ->
+                  Buffer.add_string buf delta;
+                  print_string delta; flush stdout
+              | _ -> ()
+            ) lines;
+            Lwt.return ()
+          ) stream_body in
+          print_newline ();
+          let content = strip_markdown (Buffer.contents buf) in
+          if String.starts_with ~prefix:"ERROR:" content
+          then Lwt.return (AiError content)
+          else Lwt.return (Command content)
+        end else begin
+          let* body_str = Cohttp_lwt.Body.to_string body_resp in
+          let json = Yojson.Basic.from_string body_str in
+          let open Yojson.Basic.Util in
+          let content = json |> member "content" |> index 0
+            |> member "text" |> to_string in
+          let content = strip_markdown content in
+          if String.starts_with ~prefix:"ERROR:" content
+          then Lwt.return (AiError content)
+          else Lwt.return (Command content)
+        end)
        (fun exn -> Lwt.return (AiError ("Anthropic API: " ^ Printexc.to_string exn)))
 
 (* ============================================================ *)
@@ -270,15 +307,59 @@ let build_input_with_context ~history ~user_input =
 let conversation : (string * string) list ref = ref []  (* (role, content) *)
 let max_turns = 6
 
+let conv_path () =
+  let home = try Sys.getenv "HOME" with Not_found -> "." in
+  Filename.concat home ".ocash/conv.json"
+
+let conv_save () =
+  try
+    let path = conv_path () in
+    let dir = Filename.dirname path in
+    (if not (Sys.file_exists dir) then
+       try Unix.mkdir dir 0o755 with _ -> ());
+    let json = `List (List.map (fun (role, msg) ->
+      `Assoc [("role", `String role); ("content", `String msg)]) !conversation) in
+    let oc = open_out path in
+    output_string oc (Yojson.Basic.to_string json);
+    close_out oc
+  with _ -> ()  (* fallo silencioso: no rompemos UX por persistencia *)
+
+let conv_load () =
+  let path = conv_path () in
+  if not (Sys.file_exists path) then conversation := []
+  else
+    try
+      let ic = open_in path in
+      let n = in_channel_length ic in
+      let s = really_input_string ic n in
+      close_in ic;
+      let json = Yojson.Basic.from_string s in
+      let open Yojson.Basic.Util in
+      let items = json |> to_list |> List.map (fun obj ->
+        let role = obj |> member "role" |> to_string in
+        let content = obj |> member "content" |> to_string in
+        (role, content)) in
+      conversation := items
+    with _ -> conversation := []  (* corrupto: ignora *)
+
+let conv_trim () =
+  while List.length !conversation > max_turns * 2 do
+    conversation := List.tl !conversation
+  done
+
 let conv_add_user msg =
   conversation := !conversation @ [("user", msg)];
-  if List.length !conversation > max_turns * 2 then
-    conversation := List.tl !conversation
+  conv_trim ();
+  conv_save ()
 
 let conv_add_assistant msg =
-  conversation := !conversation @ [("assistant", msg)]
+  conversation := !conversation @ [("assistant", msg)];
+  conv_trim ();
+  conv_save ()
 
-let conv_reset () = conversation := []
+let conv_reset () =
+  conversation := [];
+  conv_save ()
 
 (* ============================================================ *)
 (* Self-correction: dado comando fallido + stderr, propone fix   *)
@@ -334,6 +415,7 @@ let check_local_server () =
     (fun _ -> Lwt.return false)
 
 let init () =
+  conv_load ();
   let backend_str = try Sys.getenv "OCASH_AI_BACKEND" with Not_found -> "" in
   current_backend := backend_of_string backend_str;
   let url = Option.value ~default:"http://localhost:8080"

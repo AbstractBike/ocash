@@ -33,8 +33,12 @@ let needs_bash input =
     with Not_found -> false
   in
   let starts_with_assign_then_cmd () =
-    (* FOO=bar comando ... → bash debe expandir FOO solo para comando *)
-    let re = Str.regexp "^[ \t]*[A-Za-z_][A-Za-z0-9_]*=[^ \t\n]*[ \t]+[A-Za-z]" in
+    (* FOO=bar comando ... → bash debe expandir FOO solo para comando.
+       Solo matcheamos si el valor NO empieza con quote, para no
+       confundir `MSG="hola mundo"` (assignment puro, native lo maneja)
+       con `FOO=bar comando` (env temporal). *)
+    let re = Str.regexp
+      "^[ \t]*[A-Za-z_][A-Za-z0-9_]*=[^\"' \t\n][^ \t\n]*[ \t]+[A-Za-z]" in
     Str.string_match re s 0
   in
   (* Multi-línea: bash *)

@@ -237,22 +237,28 @@ let handle_argv () =
 (* Restaura el terminal a un estado conocido. Lambda-term deja varios
    modos activos (alt-screen, bracketed paste, application keypad...)
    que confunden al shell padre haciendo que escape codes se vean
-   literales en su prompt. Cubrimos todos los modos comunes. *)
+   literales en su prompt. Cubrimos todos los modos comunes.
+
+   IMPORTANTE: solo imprime escape codes si stdout es un TTY. En pipes
+   o forks de builtins, escupiría las secuencias literales al stdout
+   del pipeline (visible como '[?25h[?1049l...' en la salida). *)
 let reset_terminal () =
-  let seqs = [
-    "\027[0m";       (* SGR reset: colores/bold/dim *)
-    "\027[?25h";     (* DECTCEM: cursor visible *)
-    "\027[?1049l";   (* alt-screen off *)
-    "\027[?47l";     (* alt-screen viejo off *)
-    "\027[?2004l";   (* bracketed paste off *)
-    "\027[?1l";      (* DECCKM: cursor keys normal *)
-    "\027[?7h";      (* DECAWM: autowrap on *)
-    "\027>";         (* DECPNM: keypad normal *)
-    "\027(B";        (* G0 = USASCII *)
-    "\027[!p";       (* DECSTR: soft reset *)
-  ] in
-  List.iter print_string seqs;
-  flush stdout;
+  if Unix.isatty Unix.stdout then begin
+    let seqs = [
+      "\027[0m";       (* SGR reset: colores/bold/dim *)
+      "\027[?25h";     (* DECTCEM: cursor visible *)
+      "\027[?1049l";   (* alt-screen off *)
+      "\027[?47l";     (* alt-screen viejo off *)
+      "\027[?2004l";   (* bracketed paste off *)
+      "\027[?1l";      (* DECCKM: cursor keys normal *)
+      "\027[?7h";      (* DECAWM: autowrap on *)
+      "\027>";         (* DECPNM: keypad normal *)
+      "\027(B";        (* G0 = USASCII *)
+      "\027[!p";       (* DECSTR: soft reset *)
+    ] in
+    List.iter print_string seqs;
+    flush stdout
+  end;
   if Unix.isatty Unix.stdin then begin
     (try
       let attr = Unix.tcgetattr Unix.stdin in
@@ -260,7 +266,6 @@ let reset_terminal () =
         { attr with c_icanon = true; c_echo = true; c_isig = true;
                     c_ixon = true; c_brkint = true }
     with _ -> ());
-    (* Fallback nuclear: stty sane resetea TODO. Best-effort. *)
     (try ignore (Sys.command "stty sane 2>/dev/null") with _ -> ())
   end
 

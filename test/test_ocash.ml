@@ -177,7 +177,37 @@ let test_expand_tilde () =
   Alcotest.(check string) "no tilde sin cambios" "/abs" (Eval.expand_tilde env "/abs");
   Alcotest.(check string) "~user no se expande" "~bob" (Eval.expand_tilde env "~bob")
 
+let test_echo_n_no_newline () =
+  with_tmp_file (fun out ->
+    let env = Eval.create_env () in
+    let _ = run_line env (Printf.sprintf "echo -n hola > %s" out) in
+    Alcotest.(check string) "sin newline final" "hola" (read_file out))
+
+let test_echo_e_escapes () =
+  with_tmp_file (fun out ->
+    let env = Eval.create_env () in
+    let _ = run_line env (Printf.sprintf "echo -e a\\tb > %s" out) in
+    Alcotest.(check string) "tab interpretado" "a\tb\n" (read_file out))
+
+let test_echo_default_keeps_backslash () =
+  with_tmp_file (fun out ->
+    let env = Eval.create_env () in
+    let _ = run_line env (Printf.sprintf "echo a\\tb > %s" out) in
+    Alcotest.(check string) "sin -e: literal" "a\\tb\n" (read_file out))
+
+let test_interpret_escapes () =
+  Alcotest.(check string) "newline+tab" "a\nb\tc"
+    (Eval.interpret_escapes "a\\nb\\tc");
+  Alcotest.(check string) "octal \\0101 = A" "A"
+    (Eval.interpret_escapes "\\0101");
+  Alcotest.(check string) "desconocido literal" "\\q"
+    (Eval.interpret_escapes "\\q")
+
 let eval_tests = [
+  Alcotest.test_case "echo -n"         `Quick test_echo_n_no_newline;
+  Alcotest.test_case "echo -e escapes" `Quick test_echo_e_escapes;
+  Alcotest.test_case "echo default \\" `Quick test_echo_default_keeps_backslash;
+  Alcotest.test_case "interpret_escapes" `Quick test_interpret_escapes;
   Alcotest.test_case "pipe + redirect" `Quick test_eval_pipe_redirect;
   Alcotest.test_case "cd persists"     `Quick test_eval_cd_persists;
   Alcotest.test_case "redirect file"   `Quick test_eval_redirect_writes_file;

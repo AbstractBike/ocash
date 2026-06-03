@@ -160,6 +160,71 @@ let do_cd env target =
     Printf.eprintf "ocash: cd: %s: %s\n%!" target (Unix.error_message e);
     Lwt.return 1
 
+(* Interpreta los escapes de bash `echo -e`: \n \t \r \\ \a \b \f \v \e
+   y \0NNN (octal). Escapes desconocidos se dejan literales (con la barra). *)
+let interpret_escapes s =
+  let buf = Buffer.create (String.length s) in
+  let len = String.length s in
+  let i = ref 0 in
+  while !i < len do
+    if s.[!i] = '\\' && !i + 1 < len then begin
+      (match s.[!i + 1] with
+       | 'n' -> Buffer.add_char buf '\n'; i := !i + 2
+       | 't' -> Buffer.add_char buf '\t'; i := !i + 2
+       | 'r' -> Buffer.add_char buf '\r'; i := !i + 2
+       | '\\' -> Buffer.add_char buf '\\'; i := !i + 2
+       | 'a' -> Buffer.add_char buf '\007'; i := !i + 2
+       | 'b' -> Buffer.add_char buf '\008'; i := !i + 2
+       | 'f' -> Buffer.add_char buf '\012'; i := !i + 2
+       | 'v' -> Buffer.add_char buf '\011'; i := !i + 2
+       | 'e' -> Buffer.add_char buf '\027'; i := !i + 2
+       | '0' ->
+           (* \0NNN: hasta 3 dígitos octales tras el 0 *)
+           let j = ref (!i + 2) in
+           let stop = min len (!j + 3) in
+           let oct = ref 0 in
+           while !j < stop && s.[!j] >= '0' && s.[!j] <= '7' do
+             oct := (!oct * 8) + (Char.code s.[!j] - Char.code '0');
+             incr j
+           done;
+           Buffer.add_char buf (Char.chr (!oct land 0xff));
+           i := !j
+       | c -> Buffer.add_char buf '\\'; Buffer.add_char buf c; i := !i + 2)
+    end else begin
+      Buffer.add_char buf s.[!i];
+      incr i
+    end
+  done;
+  Buffer.contents buf
+
+(* echo con flags estilo bash: -n (sin newline final), -e (interpreta
+   escapes), -E (no interpreta, default). Acepta combinaciones (-ne). *)
+let builtin_echo args =
+  let no_newline = ref false in
+  let interpret  = ref false in
+  let is_flag arg =
+    String.length arg >= 2 && arg.[0] = '-'
+    && String.for_all (fun c -> c='n'||c='e'||c='E')
+         (String.sub arg 1 (String.length arg - 1))
+  in
+  let rec strip_flags = function
+    | arg :: rest when is_flag arg ->
+        String.iter (function
+          | 'n' -> no_newline := true
+          | 'e' -> interpret := true
+          | 'E' -> interpret := false
+          | _   -> ()) arg;
+        strip_flags rest
+    | rest -> rest
+  in
+  let rest = strip_flags args in
+  let text = String.concat " " rest in
+  let text = if !interpret then interpret_escapes text else text in
+  print_string text;
+  if not !no_newline then print_char '\n';
+  flush stdout;
+  Lwt.return 0
+
 let run_builtin env argv =
   match argv with
   | ["cd"] ->
@@ -176,7 +241,7 @@ let run_builtin env argv =
   | ["pwd"] ->
       print_endline (Unix.getcwd ()); Lwt.return 0
   | "echo" :: args ->
-      print_endline (String.concat " " args); Lwt.return 0
+      builtin_echo args
   | ["exit"] ->
       exit !last_exit_code
   | "exit" :: code :: _ ->

@@ -203,7 +203,26 @@ let test_interpret_escapes () =
   Alcotest.(check string) "desconocido literal" "\\q"
     (Eval.interpret_escapes "\\q")
 
+let test_expand_exit_code () =
+  with_tmp_file (fun out ->
+    let env = Eval.create_env () in
+    let _ = run_line env "false" in            (* exit 1 *)
+    let _ = run_line env (Printf.sprintf "echo $? > %s" out) in
+    Alcotest.(check string) "$? = 1" "1\n" (read_file out);
+    let _ = run_line env "true" in             (* exit 0 *)
+    let _ = run_line env (Printf.sprintf "echo $? > %s" out) in
+    Alcotest.(check string) "$? = 0" "0\n" (read_file out))
+
+let test_expand_pid () =
+  with_tmp_file (fun out ->
+    let env = Eval.create_env () in
+    let _ = run_line env (Printf.sprintf "echo $$ > %s" out) in
+    let pid = String.trim (read_file out) in
+    Alcotest.(check int) "$$ = pid actual" (Unix.getpid ()) (int_of_string pid))
+
 let eval_tests = [
+  Alcotest.test_case "$? exit code"    `Quick test_expand_exit_code;
+  Alcotest.test_case "$$ pid"          `Quick test_expand_pid;
   Alcotest.test_case "echo -n"         `Quick test_echo_n_no_newline;
   Alcotest.test_case "echo -e escapes" `Quick test_echo_e_escapes;
   Alcotest.test_case "echo default \\" `Quick test_echo_default_keeps_backslash;
@@ -247,6 +266,11 @@ let bash_tests = [
   nb "cd -" false;
   (* otros comandos con tilde sí caen a bash *)
   nb "ls ~/proyecto" true;
+  (* $? se expande nativo: el `?` de $? no es glob *)
+  nb "echo $?" false;
+  nb "echo exit=$?" false;
+  (* un `?` glob real sí cae a bash *)
+  nb "ls foo?.txt" true;
 ]
 
 (* ============================================================ *)

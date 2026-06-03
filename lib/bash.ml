@@ -66,8 +66,14 @@ let needs_bash input =
   contains_substr "[[" || contains_substr "[ " ||
   (* Brace expansion / blocks *)
   String.contains s '{' ||
-  (* Glob characters *)
-  contains_substr "*" || String.contains s '?' ||
+  (* Glob characters. Un `?` que forma parte de `$?` (exit code) no es
+     glob y lo expande ocash nativamente. *)
+  contains_substr "*" ||
+  (let rec has_glob_q i =
+     match String.index_from_opt s i '?' with
+     | None -> false
+     | Some k -> if k > 0 && s.[k-1] = '$' then has_glob_q (k+1) else true
+   in has_glob_q 0) ||
   (* Character classes en path *)
   (let re = Str.regexp "\\[[^]]*\\]" in
    try ignore (Str.search_forward re s 0); true with Not_found -> false) ||

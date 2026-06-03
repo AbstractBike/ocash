@@ -32,10 +32,13 @@ let next_job_id = ref 1
    el kernel ya la entrega al grupo foreground). *)
 let current_fg_pid : int ref = ref 0
 
+let last_bg_pid = ref 0
+
 let add_job ~pid ~cmdline ~state =
   let id = !next_job_id in
   incr next_job_id;
   jobs := !jobs @ [{ id; pid; cmdline; state }];
+  last_bg_pid := pid;
   id
 
 let remove_job id =
@@ -94,6 +97,10 @@ let expand_alias argv =
            parts @ rest
        | None -> argv)
 
+(* Exit code del último comando ejecutado ($?). $! (last_bg_pid) se
+   define junto a la gestión de jobs, más arriba. *)
+let last_exit_code = ref 0
+
 let expand_vars env s =
   let buf = Buffer.create (String.length s) in
   let len = String.length s in
@@ -101,6 +108,12 @@ let expand_vars env s =
   while !i < len do
     if s.[!i] = '$' && !i + 1 < len then begin
       incr i;
+      (* Variables especiales de un solo carácter: $?, $$, $! *)
+      match s.[!i] with
+      | '?' -> Buffer.add_string buf (string_of_int !last_exit_code); incr i
+      | '$' -> Buffer.add_string buf (string_of_int (Unix.getpid ())); incr i
+      | '!' -> Buffer.add_string buf (string_of_int !last_bg_pid); incr i
+      | _ ->
       let braced = s.[!i] = '{' in
       if braced then incr i;
       let start = !i in
@@ -135,8 +148,6 @@ let expand_tilde env s =
      | Some home -> home ^ String.sub s 1 (String.length s - 1)
      | None -> s)
   else s
-
-let last_exit_code = ref 0
 
 (* Forward-reference para que `source` pueda re-entrar al eval. *)
 let eval_statement_ref : (Ast.statement -> int Lwt.t) ref =
@@ -581,7 +592,10 @@ let run_pipeline env pipeline =
 
 let rec eval_statement (env : env) (stmt : Ast.statement) : int Lwt.t =
   eval_statement_ref := (fun s -> eval_statement env s);
-  eval_statement_internal env stmt
+  let open Lwt.Syntax in
+  let* code = eval_statement_internal env stmt in
+  last_exit_code := code;   (* mantiene $? al día *)
+  Lwt.return code
 and eval_statement_internal env stmt =
   match stmt with
   | Ast.Empty      -> Lwt.return 0

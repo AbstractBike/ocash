@@ -125,23 +125,54 @@ let expand_vars env s =
   done;
   Buffer.contents buf
 
+(* Expande un `~` o `~/...` inicial usando $HOME. No soporta `~usuario`
+   (eso cae a bash). Cualquier otra forma se devuelve sin tocar. *)
+let expand_tilde env s =
+  if s = "~" then
+    Option.value ~default:"~" (Hashtbl.find_opt env "HOME")
+  else if String.length s >= 2 && s.[0] = '~' && s.[1] = '/' then
+    (match Hashtbl.find_opt env "HOME" with
+     | Some home -> home ^ String.sub s 1 (String.length s - 1)
+     | None -> s)
+  else s
+
 let last_exit_code = ref 0
 
 (* Forward-reference para que `source` pueda re-entrar al eval. *)
 let eval_statement_ref : (Ast.statement -> int Lwt.t) ref =
   ref (fun _ -> Lwt.return 0)
 
+(* Cambia de directorio actualizando PWD/OLDPWD (env del padre y del
+   proceso) como hace un shell POSIX. Devuelve el exit code. *)
+let do_cd env target =
+  let oldpwd = try Unix.getcwd () with _ -> "" in
+  try
+    Unix.chdir target;
+    let newpwd = try Unix.getcwd () with _ -> target in
+    if oldpwd <> "" then begin
+      Hashtbl.replace env "OLDPWD" oldpwd;
+      (try Unix.putenv "OLDPWD" oldpwd with _ -> ())
+    end;
+    Hashtbl.replace env "PWD" newpwd;
+    (try Unix.putenv "PWD" newpwd with _ -> ());
+    Lwt.return 0
+  with Unix.Unix_error (e, _, _) ->
+    Printf.eprintf "ocash: cd: %s: %s\n%!" target (Unix.error_message e);
+    Lwt.return 1
+
 let run_builtin env argv =
   match argv with
   | ["cd"] ->
       let home = Option.value ~default:"/" (Hashtbl.find_opt env "HOME") in
-      (try Unix.chdir home with Unix.Unix_error _ -> ());
-      Lwt.return 0
+      do_cd env home
+  | "cd" :: "-" :: _ ->
+      (match Hashtbl.find_opt env "OLDPWD" with
+       | Some prev -> print_endline prev; do_cd env prev
+       | None ->
+           Printf.eprintf "ocash: cd: OLDPWD no establecido\n%!";
+           Lwt.return 1)
   | "cd" :: dir :: _ ->
-      (try Unix.chdir dir; Lwt.return 0
-       with Unix.Unix_error (e, _, _) ->
-         Printf.eprintf "ocash: cd: %s\n%!" (Unix.error_message e);
-         Lwt.return 1)
+      do_cd env (expand_tilde env dir)
   | ["pwd"] ->
       print_endline (Unix.getcwd ()); Lwt.return 0
   | "echo" :: args ->

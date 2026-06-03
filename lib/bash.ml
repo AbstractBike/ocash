@@ -32,6 +32,17 @@ let needs_bash input =
     try ignore (Str.search_forward pat s 0); true
     with Not_found -> false
   in
+  (* Primer token del input (para casos especiales como `cd`). *)
+  let first_word =
+    let t = String.trim s in
+    match String.index_opt t ' ' with
+    | Some i -> String.sub t 0 i
+    | None   -> t
+  in
+  (* `cd` debe ejecutarse siempre nativo para que el cambio de directorio
+     persista en ocash. La expansión de `~`/`~/` la hace el builtin cd,
+     así que un tilde en un `cd` no debe forzar el fallback a bash. *)
+  let is_cd = first_word = "cd" in
   let starts_with_assign_then_cmd () =
     (* FOO=bar comando ... → bash debe expandir FOO solo para comando.
        Solo matcheamos si el valor NO empieza con quote, para no
@@ -60,9 +71,10 @@ let needs_bash input =
   (* Character classes en path *)
   (let re = Str.regexp "\\[[^]]*\\]" in
    try ignore (Str.search_forward re s 0); true with Not_found -> false) ||
-  (* Tilde expansion *)
-  (let re = Str.regexp "\\(^\\|[ =:]\\)~" in
-   try ignore (Str.search_forward re s 0); true with Not_found -> false) ||
+  (* Tilde expansion (salvo en `cd`, que lo maneja nativo para persistir) *)
+  ((not is_cd) &&
+   (let re = Str.regexp "\\(^\\|[ =:]\\)~" in
+    try ignore (Str.search_forward re s 0); true with Not_found -> false)) ||
   (* Parameter expansion compleja: ${VAR:-...} ${VAR%...} etc. *)
   contains_substr "${" && (
     let re = Str.regexp "\\${[^}]*[:%#/!^,?+=-][^}]*}" in

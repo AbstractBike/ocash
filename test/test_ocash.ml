@@ -151,11 +151,40 @@ let test_eval_append () =
     let _ = run_line env (Printf.sprintf "echo b >> %s" out) in
     Alcotest.(check string) "a y b" "a\nb\n" (read_file out))
 
+let test_eval_cd_dash () =
+  let env = Eval.create_env () in
+  let orig = Sys.getcwd () in
+  let _ = run_line env "cd /tmp" in
+  let _ = run_line env "cd -" in       (* debe volver a `orig` vía OLDPWD *)
+  let after = Sys.getcwd () in
+  Unix.chdir orig;
+  Alcotest.(check string) "cd - vuelve al directorio previo" orig after
+
+let test_eval_cd_sets_oldpwd () =
+  let env = Eval.create_env () in
+  let orig = Sys.getcwd () in
+  let _ = run_line env "cd /tmp" in
+  let oldpwd = Hashtbl.find_opt env "OLDPWD" in
+  Unix.chdir orig;
+  Alcotest.(check (option string)) "OLDPWD = directorio previo"
+    (Some orig) oldpwd
+
+let test_expand_tilde () =
+  let env = Eval.create_env () in
+  Hashtbl.replace env "HOME" "/home/u";
+  Alcotest.(check string) "~ -> HOME" "/home/u" (Eval.expand_tilde env "~");
+  Alcotest.(check string) "~/x -> HOME/x" "/home/u/x" (Eval.expand_tilde env "~/x");
+  Alcotest.(check string) "no tilde sin cambios" "/abs" (Eval.expand_tilde env "/abs");
+  Alcotest.(check string) "~user no se expande" "~bob" (Eval.expand_tilde env "~bob")
+
 let eval_tests = [
   Alcotest.test_case "pipe + redirect" `Quick test_eval_pipe_redirect;
   Alcotest.test_case "cd persists"     `Quick test_eval_cd_persists;
   Alcotest.test_case "redirect file"   `Quick test_eval_redirect_writes_file;
   Alcotest.test_case "append redirect" `Quick test_eval_append;
+  Alcotest.test_case "cd - vuelve"     `Quick test_eval_cd_dash;
+  Alcotest.test_case "cd set OLDPWD"   `Quick test_eval_cd_sets_oldpwd;
+  Alcotest.test_case "expand_tilde"    `Quick test_expand_tilde;
 ]
 
 (* ============================================================ *)
@@ -181,6 +210,13 @@ let bash_tests = [
   nb "echo `whoami`" true;
   nb "echo {1..5}" true;
   nb "FOO=bar ls" true;
+  (* `cd` con tilde debe quedarse nativo para que el cd persista *)
+  nb "cd ~" false;
+  nb "cd ~/proyecto" false;
+  nb "cd /tmp" false;
+  nb "cd -" false;
+  (* otros comandos con tilde sí caen a bash *)
+  nb "ls ~/proyecto" true;
 ]
 
 (* ============================================================ *)

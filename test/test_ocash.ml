@@ -249,7 +249,27 @@ let test_strip_plain () =
     "ls -la"
     (Ai.strip_markdown "ls -la")
 
+let test_backend_of_string () =
+  let check name expected s =
+    Alcotest.(check bool) name true (Ai.backend_of_string s = expected) in
+  check "local"     Ai.Local     "local";
+  check "llama"     Ai.Local     "llama";
+  check "vacío"     Ai.Local     "";
+  check "claude"    Ai.Claude_cli "claude";
+  check "codex"     Ai.Codex_cli  "codex";
+  check "anthropic" Ai.Anthropic  "anthropic";
+  check "openai"    Ai.Openai     "openai";
+  check "gemini"    Ai.Gemini     "gemini";
+  check "google"    Ai.Gemini     "google";
+  check "mistral"   Ai.Mistral    "mistral"
+
+let test_backend_to_string () =
+  Alcotest.(check string) "gemini" "Gemini API" (Ai.backend_to_string Ai.Gemini);
+  Alcotest.(check string) "mistral" "Mistral API" (Ai.backend_to_string Ai.Mistral)
+
 let ai_tests = [
+  Alcotest.test_case "backend of string" `Quick test_backend_of_string;
+  Alcotest.test_case "backend to string" `Quick test_backend_to_string;
   Alcotest.test_case "strip ```bash"    `Quick test_strip_bash_fence;
   Alcotest.test_case "strip ```sh"      `Quick test_strip_sh_fence;
   Alcotest.test_case "strip ```"        `Quick test_strip_plain_fence;

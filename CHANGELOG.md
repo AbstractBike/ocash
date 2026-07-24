@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- AI backends `gemini` (Google Gemini, OpenAI-compat endpoint) and `mistral`
+  (Mistral API), selected with `OCASH_AI_BACKEND`; keys via `GEMINI_API_KEY` /
+  `MISTRAL_API_KEY`, model override via `OCASH_AI_MODEL`.
+
+### Fixed
+- The `openai` backend now sends the required `model` field (default
+  `gpt-4o-mini`); previously requests to the real OpenAI API were rejected.
+
 ## [0.0.1] - 2026-05-14
 
 First tagged release of `ocash`, an OCaml-native interactive shell with embedded

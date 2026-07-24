@@ -10,6 +10,8 @@ type backend =
   | Codex_cli   (* subprocess `codex exec` *)
   | Anthropic   (* HTTP a api.anthropic.com *)
   | Openai      (* HTTP a api.openai.com *)
+  | Gemini      (* HTTP a generativelanguage.googleapis.com (OpenAI-compat) *)
+  | Mistral     (* HTTP a api.mistral.ai (OpenAI-compat) *)
 
 let backend_of_string = function
   | "local" | "llama" | ""    -> Local
@@ -17,6 +19,8 @@ let backend_of_string = function
   | "codex"  | "codex-cli"    -> Codex_cli
   | "anthropic" | "api"       -> Anthropic
   | "openai"                  -> Openai
+  | "gemini" | "google"       -> Gemini
+  | "mistral"                 -> Mistral
   | s -> Printf.eprintf "ocash: backend AI desconocido '%s', usando local\n%!" s;
          Local
 
@@ -26,6 +30,8 @@ let backend_to_string = function
   | Codex_cli  -> "codex CLI"
   | Anthropic  -> "Anthropic API"
   | Openai     -> "OpenAI API"
+  | Gemini     -> "Gemini API"
+  | Mistral    -> "Mistral API"
 
 let current_backend = ref Local
 let server_url = ref "http://localhost:8080"
@@ -146,9 +152,9 @@ let parse_sse_line line =
               | None -> None))
       with _ -> None
 
-let query_openai_compat ~url ~headers ~user_input =
+let query_openai_compat ?model ?(path="/v1/chat/completions") ~url ~headers ~user_input () =
   let stream = stream_enabled () in
-  let body = Yojson.Basic.to_string (`Assoc [
+  let base_fields = [
     ("stream",      `Bool stream);
     ("max_tokens",  `Int 300);
     ("temperature", `Float 0.05);
@@ -156,8 +162,13 @@ let query_openai_compat ~url ~headers ~user_input =
       `Assoc [("role", `String "system"); ("content", `String system_prompt)];
       `Assoc [("role", `String "user");   ("content", `String user_input)];
     ])
-  ]) in
-  let uri = Uri.of_string (url ^ "/v1/chat/completions") in
+  ] in
+  let fields = match model with
+    | Some m -> ("model", `String m) :: base_fields
+    | None -> base_fields
+  in
+  let body = Yojson.Basic.to_string (`Assoc fields) in
+  let uri = Uri.of_string (url ^ path) in
   let headers = Cohttp.Header.add_list (Cohttp.Header.init ())
     (("Content-Type", "application/json") :: headers) in
   Lwt.catch (fun () ->
@@ -392,9 +403,12 @@ let query ?(history=[]) ?(multi_turn=false) ~user_input () =
       else
         build_input_with_context ~history ~user_input
     in
+    let model_env ~default =
+      Option.value ~default (Sys.getenv_opt "OCASH_AI_MODEL") in
     match !current_backend with
     | Local ->
-        query_openai_compat ~url:!server_url ~headers:[] ~user_input
+        query_openai_compat ?model:(Sys.getenv_opt "OCASH_AI_MODEL")
+          ~url:!server_url ~headers:[] ~user_input ()
     | Anthropic ->
         query_anthropic ~user_input
     | Openai ->
@@ -403,9 +417,31 @@ let query ?(history=[]) ?(multi_turn=false) ~user_input () =
          | Some key ->
              let url = Option.value ~default:"https://api.openai.com"
                (Sys.getenv_opt "OCASH_AI_URL") in
-             query_openai_compat ~url
+             query_openai_compat ~model:(model_env ~default:"gpt-4o-mini") ~url
                ~headers:[("Authorization", "Bearer " ^ key)]
-               ~user_input)
+               ~user_input ())
+    | Gemini ->
+        (match Sys.getenv_opt "GEMINI_API_KEY" with
+         | None -> Lwt.return (AiError "GEMINI_API_KEY no está definido")
+         | Some key ->
+             (* Endpoint OpenAI-compatible de la API Gemini *)
+             let url = Option.value
+               ~default:"https://generativelanguage.googleapis.com"
+               (Sys.getenv_opt "OCASH_AI_URL") in
+             query_openai_compat ~model:(model_env ~default:"gemini-2.5-flash")
+               ~path:"/v1beta/openai/chat/completions" ~url
+               ~headers:[("Authorization", "Bearer " ^ key)]
+               ~user_input ())
+    | Mistral ->
+        (match Sys.getenv_opt "MISTRAL_API_KEY" with
+         | None -> Lwt.return (AiError "MISTRAL_API_KEY no está definido")
+         | Some key ->
+             let url = Option.value ~default:"https://api.mistral.ai"
+               (Sys.getenv_opt "OCASH_AI_URL") in
+             query_openai_compat ~model:(model_env ~default:"mistral-small-latest")
+               ~url
+               ~headers:[("Authorization", "Bearer " ^ key)]
+               ~user_input ())
     | Claude_cli ->
         query_cli_subprocess ~bin:"claude" ~args:["--print"; "--output-format"; "text"] ~user_input
     | Codex_cli ->
@@ -444,12 +480,14 @@ let init () =
     | Codex_cli  -> Lwt.return (cli_available "codex")
     | Anthropic  -> Lwt.return (Sys.getenv_opt "ANTHROPIC_API_KEY" <> None)
     | Openai     -> Lwt.return (Sys.getenv_opt "OPENAI_API_KEY" <> None)
+    | Gemini     -> Lwt.return (Sys.getenv_opt "GEMINI_API_KEY" <> None)
+    | Mistral    -> Lwt.return (Sys.getenv_opt "MISTRAL_API_KEY" <> None)
   in
   ai_enabled := available;
   let backend_name = backend_to_string !current_backend in
   let detail = match !current_backend with
     | Local -> Printf.sprintf " @ %s" !server_url
-    | Anthropic | Openai -> " (vía API key)"
+    | Anthropic | Openai | Gemini | Mistral -> " (vía API key)"
     | _ -> ""
   in
   if available then
@@ -461,6 +499,8 @@ let init () =
       | Codex_cli  -> "instala codex CLI"
       | Anthropic  -> "exporta ANTHROPIC_API_KEY"
       | Openai     -> "exporta OPENAI_API_KEY"
+      | Gemini     -> "exporta GEMINI_API_KEY"
+      | Mistral    -> "exporta MISTRAL_API_KEY"
     in
     Printf.printf "\027[33m\xe2\x9a\xa0 AI no disponible\027[0m [%s] (%s)\n%!"
       backend_name hint

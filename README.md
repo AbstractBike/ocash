@@ -7,7 +7,7 @@
 replacement for `bash`: it parses pipes, redirects, assignments and a wide set
 of builtins natively, and transparently falls back to `bash -c` for anything
 else (control flow, command substitution, globs, heredocs). On top of that it
-ships an AI assistant with five interchangeable backends, an embedded OCaml
+ships an AI assistant with seven interchangeable backends, an embedded OCaml
 toploop, an `ansible` builtin, and a companion JIT "unikernel" that compiles
 OCaml handlers on the fly. The goal is a shell that feels like `bash` when you
 want it to, like `ocaml` when you need it to, and like `fish` (ghost-text,
@@ -80,19 +80,22 @@ user [AI] ~/ocash (main*) {14} $ <Ctrl-R>git
 
 ### AI assistant (multi-backend)
 
-- Five backends, selected with `OCASH_AI_BACKEND`:
+- Seven backends, selected with `OCASH_AI_BACKEND`:
   - `local` — HTTP to `llama-server` (OpenAI-compatible, default)
   - `claude` — subprocess to the `claude` CLI
   - `codex` — subprocess to the `codex` CLI
   - `anthropic` — HTTPS to `api.anthropic.com`
   - `openai` — HTTPS to `api.openai.com`
+  - `gemini` — HTTPS to `generativelanguage.googleapis.com` (OpenAI-compat endpoint)
+  - `mistral` — HTTPS to `api.mistral.ai`
 - Triggers:
   - Prefixes `habla:`, `ai:`, `?:`, `haz:`, `make:`, `di:` send the rest of
     the line to the model
   - Trailing `ç` (or ` ç`) sends the line plus the last 8 history entries as
     context
-- Streaming SSE for `local`, `openai`, `anthropic` (`OCASH_AI_STREAM=0` to
-  disable); auto-detects OpenAI vs. Anthropic event format
+- Streaming SSE for `local`, `openai`, `anthropic`, `gemini`, `mistral`
+  (`OCASH_AI_STREAM=0` to disable); auto-detects OpenAI vs. Anthropic event
+  format
 - Multi-turn conversation persisted at `~/.ocash/conv.json` (trimmed to the
   last 6 turns)
 - Self-correction: when a command exits non-zero or an OCaml phrase fails to
@@ -196,13 +199,15 @@ OCASH_AI_URL=http://localhost:8081 ./_build/default/bin/main.exe
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OCASH_AI_BACKEND` | `local` | Backend: `local`, `claude`, `codex`, `anthropic`, `openai` |
-| `OCASH_AI_URL` | `http://localhost:8080` | Endpoint for the `local` and `openai` backends |
-| `OCASH_AI_MODEL` | `claude-haiku-4-5-20251001` | Model name for the API backends |
+| `OCASH_AI_BACKEND` | `local` | Backend: `local`, `claude`, `codex`, `anthropic`, `openai`, `gemini`, `mistral` |
+| `OCASH_AI_URL` | `http://localhost:8080` | Endpoint override for the `local`, `openai`, `gemini` and `mistral` backends |
+| `OCASH_AI_MODEL` | (per backend) | Model name for the API backends (defaults: `claude-haiku-4-5-20251001`, `gpt-4o-mini`, `gemini-2.5-flash`, `mistral-small-latest`) |
 | `OCASH_AI_STREAM` | `1` | `1`/`0` — enable SSE streaming on `local` and API backends |
 | `OCASH_RAG` | (unset) | `1` to augment AI queries with snippets from the cwd |
 | `ANTHROPIC_API_KEY` | (unset) | Required for `OCASH_AI_BACKEND=anthropic` |
 | `OPENAI_API_KEY` | (unset) | Required for `OCASH_AI_BACKEND=openai` |
+| `GEMINI_API_KEY` | (unset) | Required for `OCASH_AI_BACKEND=gemini` |
+| `MISTRAL_API_KEY` | (unset) | Required for `OCASH_AI_BACKEND=mistral` |
 | `OCASH_ANSIBLE_INVENTORY` | (unset) | Default inventory file forwarded as `-i` to the `ansible` builtin |
 | `OCASH_HANDLERS_DIR` | `~/.ocash/handlers` | Where the unikernel persists compiled handlers |
 | `PORT` | `8081` | Port the unikernel listens on |
@@ -245,7 +250,7 @@ See also [`man/ocash.1`](man/ocash.1) and
    ├──> lib/completion   (paths + builtins)                   │
    ├──> lib/history      (persistent + fuzzy)                 │
    ├──> lib/rag          (BM25 over cwd snippets)             │
-   └──> lib/ai           (5 backends, SSE, multi-turn) ◄──────┘
+   └──> lib/ai           (7 backends, SSE, multi-turn) ◄──────┘
                               │
                               ▼
                   ┌───────────────────────┐        ┌──────────────────────┐
@@ -315,7 +320,7 @@ Source: [`test/test_ocash.ml`](test/test_ocash.ml).
 - [x] Prometheus `/metrics` endpoint and persistent counters on the unikernel
 - [ ] MirageOS Fase 2 with build-time precompilation of handlers (Option A
       in [`unikernel/mirage/README.md`](unikernel/mirage/README.md))
-- [ ] Additional AI backends (Gemini, Mistral)
+- [x] Additional AI backends (Gemini, Mistral)
 - [ ] Full POSIX job control (`setpgid` / `tcsetpgrp` / SIGTTOU handling)
 - [ ] Defence-in-depth sandbox for handlers (cgroup v2 + seccomp-bpf)
 

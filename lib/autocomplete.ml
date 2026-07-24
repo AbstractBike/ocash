@@ -13,7 +13,8 @@ open Lwt.Syntax
 let enabled () =
   Lazy.force Gpu.has_gpu ||
   (match !Ai.current_backend with
-   | Ai.Claude_cli | Ai.Codex_cli | Ai.Anthropic | Ai.Openai -> true
+   | Ai.Claude_cli | Ai.Codex_cli | Ai.Anthropic | Ai.Openai
+   | Ai.Gemini | Ai.Mistral -> true
    | Ai.Local -> Lazy.force Gpu.has_gpu)
 
 let autocomplete_prompt = {|You are a shell autocomplete assistant. The user is mid-typing a command.

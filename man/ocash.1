@@ -15,7 +15,7 @@ Características destacadas:
 .IP \(bu 2
 Asistente AI con múltiples backends: \fBlocal\fR (llama-server,
 OpenAI-compatible), \fBclaude\fR CLI, \fBcodex\fR CLI, \fBanthropic\fR API,
-\fBopenai\fR API.
+\fBopenai\fR API, \fBgemini\fR API, \fBmistral\fR API.
 .IP \(bu 2
 Modos en lenguaje natural: \fBhabla:\fR \fItexto\fR convierte la petición
 en un comando shell; el carácter \fBç\fR como sufijo añade contexto de
@@ -47,15 +47,16 @@ Imprime la versión de ocash y termina con código 0.
 .TP
 .B OCASH_AI_BACKEND
 Selecciona el backend AI. Valores: \fIlocal\fR (default), \fIclaude\fR,
-\fIcodex\fR, \fIanthropic\fR, \fIopenai\fR.
+\fIcodex\fR, \fIanthropic\fR, \fIopenai\fR, \fIgemini\fR, \fImistral\fR.
 .TP
 .B OCASH_AI_URL
-URL del servidor para los backends \fIlocal\fR y \fIopenai\fR. Default
-\fIhttp://localhost:8080\fR para local.
+URL del servidor para los backends \fIlocal\fR, \fIopenai\fR, \fIgemini\fR
+y \fImistral\fR. Default \fIhttp://localhost:8080\fR para local.
 .TP
 .B OCASH_AI_MODEL
-Modelo a usar en los backends API (default \fIclaude-haiku-4-5-20251001\fR
-para Anthropic).
+Modelo a usar en los backends API. Defaults:
+\fIclaude-haiku-4-5-20251001\fR (anthropic), \fIgpt-4o-mini\fR (openai),
+\fIgemini-2.5-flash\fR (gemini), \fImistral-small-latest\fR (mistral).
 .TP
 .B OCASH_AI_STREAM
 \fI1\fR/\fI0\fR. Habilita o deshabilita SSE streaming en el backend
@@ -70,6 +71,12 @@ API key para el backend \fIanthropic\fR.
 .TP
 .B OPENAI_API_KEY
 API key para el backend \fIopenai\fR.
+.TP
+.B GEMINI_API_KEY
+API key para el backend \fIgemini\fR.
+.TP
+.B MISTRAL_API_KEY
+API key para el backend \fImistral\fR.
 .SH EXAMPLES
 Arrancar ocash:
 .PP

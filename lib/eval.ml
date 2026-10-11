@@ -11,7 +11,7 @@ let create_env () : env =
   ) (Unix.environment ());
   t
 
-let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"; "hsearch"; "alias"; "unalias"; "source"; "."; "jobs"; "fg"; "bg"]
+let builtins = ["cd"; "exit"; "export"; "echo"; "pwd"; "history"; "set"; "ansible"; "ocaml"; "hsearch"; "alias"; "unalias"; "unset"; "source"; "."; "jobs"; "fg"; "bg"]
 
 (* ===== Job control ===================================================== *)
 
@@ -65,6 +65,18 @@ let reap_jobs () =
 let purge_done_jobs () =
   jobs := List.filter (fun j -> j.state <> Done) !jobs
 
+(* Avisa de los jobs en background que terminaron, como bash antes del
+   prompt: `[1]+  Done  sleep 5`. *)
+let notify_done_jobs () =
+  if !jobs <> [] then begin
+    reap_jobs ();
+    List.iter (fun j ->
+      if j.state = Done then
+        Printf.printf "[%d]+  Done\t\t%s\n%!" j.id j.cmdline
+    ) !jobs;
+    purge_done_jobs ()
+  end
+
 (* Render simple de un statement a string para mostrar en `jobs`. *)
 let rec render_pipeline = function
   | Ast.Single { Ast.argv; _ } -> String.concat " " argv
@@ -79,71 +91,140 @@ let rec render_statement = function
   | Ast.Seq (a, b)  -> render_statement a ^ "; "  ^ render_statement b
   | Ast.Background s -> render_statement s ^ " &"
 
+let last_exit_code = ref 0
+
 (* Tabla de aliases mutables. expand_alias se aplica al primer token. *)
 let aliases : (string, string) Hashtbl.t = Hashtbl.create 32
 
+(* argv está en forma escapada (ver Parser): `\ls` no coincide con el
+   alias `ls`, igual que en bash. *)
 let expand_alias argv =
   match argv with
   | [] -> argv
   | head :: rest ->
       (match Hashtbl.find_opt aliases head with
        | Some expanded ->
-           (* expanded puede ser "ls -la --color=auto"; split por espacios *)
-           let parts = String.split_on_char ' ' expanded
-             |> List.filter (fun s -> s <> "") in
+           let parts = match Parser.split_words expanded with
+             | Some ws -> ws
+             | None ->
+                 String.split_on_char ' ' expanded
+                 |> List.filter (fun s -> s <> "")
+                 |> List.map Parser.escape_all
+           in
            parts @ rest
        | None -> argv)
 
-let expand_vars env s =
+(* Expansión textual del alias de la primera palabra de una línea.
+   Necesaria cuando la línea va a `bash -c` (bash no conoce nuestros
+   aliases) o cuando el alias contiene pipes/operadores que no caben en
+   un argv. Con ~force:false solo expande este segundo caso. *)
+let expand_alias_text ~force line =
+  let trimmed = String.trim line in
+  let len = String.length trimmed in
+  let i = try String.index trimmed ' ' with Not_found -> len in
+  let head = String.sub trimmed 0 i in
+  match Hashtbl.find_opt aliases head with
+  | Some v when force || Parser.split_words v = None ->
+      Some (v ^ String.sub trimmed i (len - i))
+  | _ -> None
+
+let is_var_char c =
+  c = '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+  || (c >= '0' && c <= '9')
+
+(* Resuelve una palabra en forma escapada: `\c` → c literal, `$VAR`,
+   `${VAR}`, `$?` y `$$` se expanden; un `$` que no va seguido de un
+   nombre se queda literal (como en bash: `sed 's/$/x/'`). *)
+let expand_word env s =
   let buf = Buffer.create (String.length s) in
   let len = String.length s in
   let i   = ref 0 in
   while !i < len do
-    if s.[!i] = '$' && !i + 1 < len then begin
-      incr i;
-      let braced = s.[!i] = '{' in
-      if braced then incr i;
-      let start = !i in
-      let j = ref !i in
-      while !j < len &&
-            (s.[!j] = '_' ||
-             (Char.code s.[!j] >= 65 && Char.code s.[!j] <= 90) ||
-             (Char.code s.[!j] >= 97 && Char.code s.[!j] <= 122) ||
-             (Char.code s.[!j] >= 48 && Char.code s.[!j] <= 57)) do
-        incr j
-      done;
-      let var = String.sub s start (!j - start) in
-      Buffer.add_string buf
-        (Option.value ~default:""
-          (Hashtbl.find_opt env var));
-      if braced && !j < len && s.[!j] = '}' then incr j;
-      i := !j
+    let c = s.[!i] in
+    if c = '\\' && !i + 1 < len then begin
+      Buffer.add_char buf s.[!i + 1];
+      i := !i + 2
+    end else if c = '$' && !i + 1 < len && s.[!i + 1] = '?' then begin
+      Buffer.add_string buf (string_of_int !last_exit_code);
+      i := !i + 2
+    end else if c = '$' && !i + 1 < len && s.[!i + 1] = '$' then begin
+      Buffer.add_string buf (string_of_int (Unix.getpid ()));
+      i := !i + 2
+    end else if c = '$' && !i + 1 < len
+                && (is_var_char s.[!i + 1] || s.[!i + 1] = '{') then begin
+      let braced = s.[!i + 1] = '{' in
+      let start = !i + (if braced then 2 else 1) in
+      let j = ref start in
+      while !j < len && is_var_char s.[!j] do incr j done;
+      if braced && not (!j < len && s.[!j] = '}') then begin
+        (* `${` sin cerrar: literal *)
+        Buffer.add_char buf '$';
+        incr i
+      end else begin
+        let var = String.sub s start (!j - start) in
+        Buffer.add_string buf
+          (Option.value ~default:"" (Hashtbl.find_opt env var));
+        i := if braced then !j + 1 else !j
+      end
     end else begin
-      Buffer.add_char buf s.[!i];
+      Buffer.add_char buf c;
       incr i
     end
   done;
   Buffer.contents buf
 
-let last_exit_code = ref 0
+(* Compatibilidad: nombre histórico. *)
+let expand_vars = expand_word
+
+let expand_redirect env = function
+  | Ast.Stdout_to f  -> Ast.Stdout_to (expand_word env f)
+  | Ast.Stderr_to f  -> Ast.Stderr_to (expand_word env f)
+  | Ast.Append_to f  -> Ast.Append_to (expand_word env f)
+  | Ast.Stdin_from f -> Ast.Stdin_from (expand_word env f)
+
+let set_var env k v =
+  Hashtbl.replace env k v;
+  Unix.putenv k v
+
 
 (* Forward-reference para que `source` pueda re-entrar al eval. *)
 let eval_statement_ref : (Ast.statement -> int Lwt.t) ref =
   ref (fun _ -> Lwt.return 0)
 
+(* Evaluador de líneas completas para `source`. main.ml lo sustituye por
+   su eval_line (fallback a bash, aliases); por defecto solo el parser
+   nativo, descartando lo que no parsea. *)
+let source_line_ref : (string -> int Lwt.t) option ref = ref None
+
 let run_builtin env argv =
   match argv with
-  | ["cd"] ->
+  | "cd" :: rest ->
       let home = Option.value ~default:"/" (Hashtbl.find_opt env "HOME") in
-      (try Unix.chdir home with Unix.Unix_error _ -> ());
-      Lwt.return 0
-  | "cd" :: dir :: _ ->
-      (try Unix.chdir dir; Lwt.return 0
-       with Unix.Unix_error (e, _, _) ->
-         Printf.eprintf "ocash: cd: %s\n%!" (Unix.error_message e);
-         Lwt.return 1)
+      let target, print_it = match rest with
+        | [] -> Some home, false
+        | "-" :: _ -> Hashtbl.find_opt env "OLDPWD", true
+        | dir :: _ -> Some dir, false
+      in
+      (match target with
+       | None ->
+           Printf.eprintf "ocash: cd: OLDPWD no definido\n%!";
+           Lwt.return 1
+       | Some dir ->
+           let old = try Sys.getcwd () with Sys_error _ -> "" in
+           (try
+              Unix.chdir dir;
+              let cwd = try Sys.getcwd () with Sys_error _ -> dir in
+              if old <> "" then set_var env "OLDPWD" old;
+              set_var env "PWD" cwd;
+              if print_it then print_endline cwd;
+              Lwt.return 0
+            with Unix.Unix_error (e, _, _) ->
+              Printf.eprintf "ocash: cd: %s: %s\n%!" dir (Unix.error_message e);
+              Lwt.return 1))
   | ["pwd"] ->
       print_endline (Unix.getcwd ()); Lwt.return 0
+  | "echo" :: "-n" :: args ->
+      print_string (String.concat " " args); flush stdout; Lwt.return 0
   | "echo" :: args ->
       print_endline (String.concat " " args); Lwt.return 0
   | ["exit"] ->
@@ -192,16 +273,25 @@ let run_builtin env argv =
             Hashtbl.replace aliases name value
       ) rest;
       Lwt.return 0
+  | "unset" :: names ->
+      (* OCaml 4.14 no expone unsetenv: la variable queda vacía en el
+         entorno de los hijos, pero desaparece de la tabla de ocash. *)
+      List.iter (fun k ->
+        if Hashtbl.mem env k then begin
+          Hashtbl.remove env k;
+          (try Unix.putenv k "" with _ -> ())
+        end) names;
+      Lwt.return 0
   | "unalias" :: names ->
       List.iter (Hashtbl.remove aliases) names;
       Lwt.return 0
   | ("source" | ".") :: file :: _ ->
-      let expanded = expand_vars env file in
+      (* argv ya llega expandido; solo resolvemos `~/` *)
       let path =
-        if String.length expanded > 1 && String.sub expanded 0 2 = "~/" then
+        if String.length file > 1 && String.sub file 0 2 = "~/" then
           let home = try Sys.getenv "HOME" with Not_found -> "" in
-          home ^ String.sub expanded 1 (String.length expanded - 1)
-        else expanded
+          home ^ String.sub file 1 (String.length file - 1)
+        else file
       in
       if not (Sys.file_exists path) then begin
         Printf.eprintf "ocash: source: %s: no existe\n%!" path;
@@ -216,11 +306,14 @@ let run_builtin env argv =
               if line = "" || String.length line > 0 && line.[0] = '#'
               then loop_lines ()
               else begin
-                match Parser.parse line with
-                | Ok stmt ->
+                match !source_line_ref, Parser.parse line with
+                | Some eval_line, _ ->
+                    let* _ = eval_line line in
+                    loop_lines ()
+                | None, Ok stmt ->
                     let* _ = !eval_statement_ref stmt in
                     loop_lines ()
-                | Error _ -> loop_lines ()
+                | None, Error _ -> loop_lines ()
               end
         in
         let* code = loop_lines () in
@@ -272,8 +365,8 @@ let run_builtin env argv =
                  let (_, status) = Unix.waitpid [Unix.WUNTRACED] j.pid in
                  current_fg_pid := 0;
                  match status with
-                 | Unix.WEXITED n -> j.state <- Done; n
-                 | Unix.WSIGNALED _ -> j.state <- Done; 130
+                 | Unix.WEXITED _ | Unix.WSIGNALED _ ->
+                     j.state <- Done; Exit_status.of_status status
                  | Unix.WSTOPPED _ -> j.state <- Stopped; 128
                with Unix.Unix_error _ ->
                  current_fg_pid := 0; j.state <- Done; 1
@@ -306,40 +399,40 @@ let find_in_path cmd =
 
 (* Aplica redirects globalmente y devuelve los fds salvados para restaurar.
    Solo se usa para builtins fuera de pipelines (Single sin Pipe). *)
-let apply_redirects redirects =
-  List.filter_map (fun r ->
-    match r with
-    | Ast.Stdout_to f ->
-        let fd = Unix.openfile f [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644 in
-        let saved = Unix.dup Unix.stdout in
-        Unix.dup2 fd Unix.stdout;
-        Unix.close fd;
-        Some (Unix.stdout, saved)
-    | Ast.Append_to f ->
-        let fd = Unix.openfile f [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND] 0o644 in
-        let saved = Unix.dup Unix.stdout in
-        Unix.dup2 fd Unix.stdout;
-        Unix.close fd;
-        Some (Unix.stdout, saved)
-    | Ast.Stdin_from f ->
-        let fd = Unix.openfile f [Unix.O_RDONLY] 0 in
-        let saved = Unix.dup Unix.stdin in
-        Unix.dup2 fd Unix.stdin;
-        Unix.close fd;
-        Some (Unix.stdin, saved)
-    | Ast.Stderr_to f ->
-        let fd = Unix.openfile f [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644 in
-        let saved = Unix.dup Unix.stderr in
-        Unix.dup2 fd Unix.stderr;
-        Unix.close fd;
-        Some (Unix.stderr, saved)
-  ) redirects
-
 let restore_redirects saved =
   List.iter (fun (orig, saved_fd) ->
     Unix.dup2 saved_fd orig;
     Unix.close saved_fd
   ) saved
+
+let open_redirect = function
+  | Ast.Stdout_to f ->
+      Unix.stdout, Unix.openfile f [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644
+  | Ast.Append_to f ->
+      Unix.stdout, Unix.openfile f [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND] 0o644
+  | Ast.Stdin_from f ->
+      Unix.stdin, Unix.openfile f [Unix.O_RDONLY] 0
+  | Ast.Stderr_to f ->
+      Unix.stderr, Unix.openfile f [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644
+
+(* Si un open falla, deshace los redirects ya aplicados y relanza. *)
+let apply_redirects redirects =
+  List.fold_left (fun saved r ->
+    match open_redirect r with
+    | exception exn -> restore_redirects saved; raise exn
+    | (target, fd) ->
+        let backup = Unix.dup target in
+        Unix.dup2 fd target;
+        Unix.close fd;
+        (target, backup) :: saved
+  ) [] redirects
+  |> List.rev
+
+let redirect_error = function
+  | Unix.Unix_error (e, _, file) ->
+      Printf.eprintf "ocash: %s: %s\n%!" file (Unix.error_message e)
+  | exn ->
+      Printf.eprintf "ocash: %s\n%!" (Printexc.to_string exn)
 
 (* Resuelve redirects a (stdin_fd, stdout_fd, stderr_fd, fds_to_close_in_parent).
    No muta stdout global: solo abre archivos para los fds de un subproceso. *)
@@ -348,21 +441,17 @@ let resolve_redirects redirects (in0, out0, err0) =
   let o = ref out0 in
   let e = ref err0 in
   let opened = ref [] in
-  List.iter (fun r ->
-    match r with
-    | Ast.Stdout_to f ->
-        let fd = Unix.openfile f [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_TRUNC] 0o644 in
-        o := fd; opened := fd :: !opened
-    | Ast.Append_to f ->
-        let fd = Unix.openfile f [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_APPEND] 0o644 in
-        o := fd; opened := fd :: !opened
-    | Ast.Stdin_from f ->
-        let fd = Unix.openfile f [Unix.O_RDONLY] 0 in
-        i := fd; opened := fd :: !opened
-    | Ast.Stderr_to f ->
-        let fd = Unix.openfile f [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_TRUNC] 0o644 in
-        e := fd; opened := fd :: !opened
-  ) redirects;
+  (try
+     List.iter (fun r ->
+       let (target, fd) = open_redirect r in
+       opened := fd :: !opened;
+       if target = Unix.stdin then i := fd
+       else if target = Unix.stdout then o := fd
+       else e := fd
+     ) redirects
+   with exn ->
+     List.iter (fun fd -> try Unix.close fd with _ -> ()) !opened;
+     raise exn);
   (!i, !o, !e, !opened)
 
 (* Lanza un comando como subproceso con los fds dados.
@@ -372,9 +461,9 @@ let spawn_command env argv redirects stdin_fd stdout_fd close_in_child =
   match argv with
   | [] -> Lwt.return 0
   | prog :: _ ->
-      let (i, o, e, opened) =
-        resolve_redirects redirects (stdin_fd, stdout_fd, Unix.stderr)
-      in
+      match resolve_redirects redirects (stdin_fd, stdout_fd, Unix.stderr) with
+      | exception exn -> redirect_error exn; Lwt.return 1
+      | (i, o, e, opened) ->
       let close_in_parent () =
         List.iter (fun fd -> try Unix.close fd with _ -> ()) opened
       in
@@ -416,11 +505,7 @@ let spawn_command env argv redirects stdin_fd stdout_fd close_in_child =
         | pid ->
             close_in_parent ();
             let* (_, status) = Lwt_unix.waitpid [] pid in
-            let code = match status with
-              | Unix.WEXITED n -> n
-              | Unix.WSIGNALED _ -> 130
-              | Unix.WSTOPPED _ -> 128
-            in
+            let code = Exit_status.of_status status in
             last_exit_code := code;
             Lwt.return code
       end else begin
@@ -435,11 +520,7 @@ let spawn_command env argv redirects stdin_fd stdout_fd close_in_child =
             in
             close_in_parent ();
             let* (_, status) = Lwt_unix.waitpid [] pid in
-            let code = match status with
-              | Unix.WEXITED n   -> n
-              | Unix.WSIGNALED _ -> 130
-              | Unix.WSTOPPED _  -> 128
-            in
+            let code = Exit_status.of_status status in
             last_exit_code := code;
             Lwt.return code
       end
@@ -450,9 +531,9 @@ let run_pipeline env pipeline =
   let rec aux p stdin_fd stdout_fd close_in_child =
     match p with
     | Ast.Single cmd ->
-        let argv = List.map (expand_vars env) cmd.Ast.argv in
-        let argv = expand_alias argv in
-        spawn_command env argv cmd.Ast.redirects
+        let argv = List.map (expand_word env) (expand_alias cmd.Ast.argv) in
+        let redirects = List.map (expand_redirect env) cmd.Ast.redirects in
+        spawn_command env argv redirects
           stdin_fd stdout_fd close_in_child
     | Ast.Pipe (left, right) ->
         let (pipe_r, pipe_w) = Unix.pipe ~cloexec:true () in
@@ -471,14 +552,19 @@ let run_pipeline env pipeline =
   | Ast.Single cmd ->
       (* Single sin pipe: builtins corren in-process para que cd/export
          afecten al padre. Redirects via apply/restore globales. *)
-      let argv = List.map (expand_vars env) cmd.Ast.argv in
+      (* El alias se expande antes de mirar si es builtin: así
+         `alias ..='cd ..'` cambia el cwd del propio ocash. *)
+      let argv = List.map (expand_word env) (expand_alias cmd.Ast.argv) in
       (match argv with
        | [] -> Lwt.return 0
        | prog :: _ when List.mem prog builtins ->
-           let saved = apply_redirects cmd.Ast.redirects in
-           Lwt.finalize
-             (fun () -> run_builtin env (expand_alias argv))
-             (fun () -> restore_redirects saved; Lwt.return ())
+           let redirects = List.map (expand_redirect env) cmd.Ast.redirects in
+           (match apply_redirects redirects with
+            | exception exn -> redirect_error exn; Lwt.return 1
+            | saved ->
+                Lwt.finalize
+                  (fun () -> run_builtin env argv)
+                  (fun () -> restore_redirects saved; Lwt.return ()))
        | _ ->
            aux pipeline Unix.stdin Unix.stdout [])
   | Ast.Pipe _ -> aux pipeline Unix.stdin Unix.stdout []
@@ -490,11 +576,13 @@ and eval_statement_internal env stmt =
   match stmt with
   | Ast.Empty      -> Lwt.return 0
   | Ast.Assign (k, v) ->
-      let v' = expand_vars env v in
+      let v' = expand_word env v in
       Hashtbl.replace env k v';
       Lwt.return 0
   | Ast.Exec p ->
-      run_pipeline env p
+      let* code = run_pipeline env p in
+      last_exit_code := code;
+      Lwt.return code
   | Ast.And (a, b) ->
       let* code = eval_statement env a in
       if code = 0 then eval_statement env b
@@ -511,36 +599,37 @@ and eval_statement_internal env stmt =
       (* Intento de fast-path: Exec (Single cmd) con programa externo →
          create_process sin esperar. Para los demás casos forkeamos un
          proceso que evalúa el statement de forma síncrona y exit. *)
-      let pid_opt =
+      let launch =
         match stmt with
         | Ast.Exec (Ast.Single cmd) ->
-            let argv = List.map (expand_vars env) cmd.Ast.argv in
-            let argv = expand_alias argv in
+            let argv = List.map (expand_word env) (expand_alias cmd.Ast.argv) in
+            let redirects = List.map (expand_redirect env) cmd.Ast.redirects in
             (match argv with
-             | [] -> None
-             | prog :: _ when List.mem prog builtins -> None
+             | [] -> `Failed 0
+             | prog :: _ when List.mem prog builtins -> `Fork
              | prog :: _ ->
                  (match find_in_path prog with
                   | None ->
                       Printf.eprintf "ocash: %s: comando no encontrado\n%!" prog;
-                      None
+                      `Failed 127
                   | Some full_path ->
-                      let (i, o, e, opened) =
-                        resolve_redirects cmd.Ast.redirects
-                          (Unix.stdin, Unix.stdout, Unix.stderr)
-                      in
-                      let pid = Unix.create_process full_path
-                        (Array.of_list argv) i o e in
-                      List.iter (fun fd -> try Unix.close fd with _ -> ()) opened;
-                      Some pid))
-        | _ -> None
+                      (match resolve_redirects redirects
+                               (Unix.stdin, Unix.stdout, Unix.stderr) with
+                       | exception exn -> redirect_error exn; `Failed 1
+                       | (i, o, e, opened) ->
+                           let pid = Unix.create_process full_path
+                             (Array.of_list argv) i o e in
+                           List.iter (fun fd -> try Unix.close fd with _ -> ()) opened;
+                           `Spawned pid)))
+        | _ -> `Fork
       in
-      (match pid_opt with
-       | Some pid ->
+      (match launch with
+       | `Failed code -> Lwt.return code
+       | `Spawned pid ->
            let id = add_job ~pid ~cmdline ~state:Running in
            Printf.printf "[%d] %d\n%!" id pid;
            Lwt.return 0
-       | None ->
+       | `Fork ->
            (* Fork genérico: el child ejecuta el statement y exit *)
            (match Unix.fork () with
             | 0 ->

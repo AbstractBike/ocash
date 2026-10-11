@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Single quotes now prevent variable expansion (`echo '$HOME'` printed the
+  home directory); double quotes honour `\"`, `\$`, `\\`; unquoted `\c` is
+  a literal `c`. A `$` not followed by a name stays literal (`sed 's/$/x/'`
+  used to lose it).
+- Redirect targets are expanded (`> $HOME/x` created a file literally named
+  `$HOME/x`).
+- `bash -c` fallback now syncs the working directory and exported variables
+  back into ocash: `cd ~`, `cd $(...)`, `export X=$(...)` and
+  `source ~/...` had no effect before.
+- Aliases are resolved before builtin dispatch, so `alias ..='cd ..'` changes
+  ocash's own cwd instead of a forked child's. Aliases are also expanded
+  before handing a line to bash, and alias values with quotes are tokenised
+  properly.
+- `$?` reflects the last command in every path (native, bash fallback,
+  `time`); previously it was not expanded natively and bash always saw 0.
+  The self-correction prompt no longer fires on a stale exit code.
+- Failing redirects (`cat < missing`, `echo x > /no/dir/f`) print a clean
+  error and return 1 instead of a raw `Unix.Unix_error` exception; builtin
+  redirects already applied are rolled back.
+- `cmd &` with an unknown command no longer prints the error twice and leaves
+  a phantom job.
+- Exit status of signal-killed processes is `128 + signal` (was always 130).
+- AI self-corrections are run through the full line evaluator, so fixes using
+  `&&`, `;` or `$(...)` are no longer silently dropped.
+- `source` / `~/.ocashrc` lines go through the same evaluator as typed
+  lines: lines with `&&`, `$(...)`, `~` or globs used to be dropped silently
+  or run without tilde expansion. The rc path is quoted.
+
+### Added
+- `cd -`, `PWD`/`OLDPWD` maintenance, `unset`, `echo -n`, `$$`.
+- Finished background jobs are reported before the next prompt.
+- 26 new tests (74 total).
+
 ## [0.0.1] - 2026-05-14
 
 First tagged release of `ocash`, an OCaml-native interactive shell with embedded

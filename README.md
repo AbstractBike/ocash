@@ -1,7 +1,7 @@
 # ocash — interactive OCaml shell with AI, Ansible & a JIT unikernel
 
 [![OCaml](https://img.shields.io/badge/OCaml-%E2%89%A5%204.14-orange.svg)](#building-from-source)
-[![Tests](https://img.shields.io/badge/tests-48%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#testing)
 
 `ocash` is a Unix shell written in OCaml that aims to be a drop-in interactive
 replacement for `bash`: it parses pipes, redirects, assignments and a wide set
@@ -60,13 +60,22 @@ user [AI] ~/ocash (main*) {14} $ <Ctrl-R>git
 ### Shell
 
 - Native parser (Angstrom) for pipes, I/O redirects (`>`, `>>`, `<`, `2>`),
-  assignments with quoting, background `&`
+  assignments, background `&`, with bash quoting rules: `'$HOME'` stays
+  literal, `"$HOME"` and `${HOME}` expand, `\$` escapes; `$?` and `$$` are
+  supported and redirect targets are expanded too
 - Automatic `bash -c` fallback for control flow (`if`, `for`, `while`, `case`),
   command substitution (`$(...)`, backticks), `&&`/`||`/`;`, heredocs, globs,
   tilde, brace expansion, parameter expansion — environment is synchronised
-  both ways
-- Builtins: `cd`, `exit`, `export`, `echo`, `pwd`, `history`, `hsearch`, `set`,
+  both ways: after the fallback, ocash picks up bash's working directory and
+  exported variables, so `cd ~/src`, `export P=$(...)` or
+  `source ~/venv/bin/activate` take effect; aliases are expanded before the
+  line is handed to bash
+- Builtins: `cd` (incl. `cd -`, keeps `PWD`/`OLDPWD`), `exit`, `export`,
+  `unset`, `echo` (`-n`), `pwd`, `history`, `hsearch`, `set`,
   `alias` / `unalias`, `source` / `.`, `jobs`, `fg`, `bg`, `ansible`, `ocaml`
+- Exit status follows bash: `128 + signal` for killed processes (Ctrl-C →
+  130, `kill -9` → 137); finished background jobs are reported before the
+  next prompt
 - `time <cmd>` prefix that wraps the full pipeline and reports real/user/sys
 - `~/.ocashrc` is sourced on startup; `~/.ocash/history` is persistent
 - Prompt with `$USER`, `$cwd`, git branch + dirty marker, file count, AI badge
@@ -298,9 +307,10 @@ Requires `ocaml >= 4.14`, `dune >= 3.12`, plus `lwt`, `lambda-term`,
 
 ## Testing
 
-The test suite is built with `alcotest` and covers 48 cases across 7
-modules (parser, eval, bash classifier, history fuzzy scoring, AI
-markdown stripping, autocomplete prefix logic, RAG tokenizer):
+The test suite is built with `alcotest` and covers 74 cases across 9
+groups (parser, quoting/expansion, eval, bash classifier, bash state sync,
+history fuzzy scoring, AI markdown stripping, autocomplete prefix logic, RAG
+tokenizer):
 
 ```bash
 dune runtest

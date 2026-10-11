@@ -56,7 +56,10 @@ let needs_bash input =
   (* Brace expansion / blocks *)
   String.contains s '{' ||
   (* Glob characters *)
-  contains_substr "*" || String.contains s '?' ||
+  contains_substr "*" ||
+  (* `?` es glob salvo en `$?`, que ocash expande nativamente *)
+  (let re = Str.regexp "\\(^\\|[^$]\\)\\?" in
+   try ignore (Str.search_forward re s 0); true with Not_found -> false) ||
   (* Character classes en path *)
   (let re = Str.regexp "\\[[^]]*\\]" in
    try ignore (Str.search_forward re s 0); true with Not_found -> false) ||
@@ -76,15 +79,108 @@ let needs_bash input =
   (* assign + comando en misma línea (env temporal) *)
   starts_with_assign_then_cmd ()
 
+(* Variables que bash gestiona por su cuenta y no deben volver a ocash. *)
+let ignored_vars = ["_"; "SHLVL"; "BASH_EXECUTION_STRING"]
+
+(* Al salir, bash vuelca su cwd y sus variables exportadas (separadas
+   por NUL) a un fichero temporal. Usa solo builtins de bash (compgen,
+   indirección ${!n}) para no depender de `env -0`, que no existe en macOS. *)
+let dump_trap state_file =
+  Printf.sprintf
+    "trap '__ocash_rc=$?; { printf \"%%s\\0\" \"$PWD\"; \
+     for __ocash_n in $(compgen -e); do \
+     printf \"%%s=%%s\\0\" \"$__ocash_n\" \"${!__ocash_n}\"; done; } \
+     > %s 2>/dev/null; exit $__ocash_rc' EXIT"
+    (Filename.quote state_file)
+
+let read_file path =
+  try
+    let ic = open_in_bin path in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    Some s
+  with _ -> None
+
+(* compgen -e solo lista nombres válidos; variables como
+   `BASH_FUNC_f%%` nunca vuelven y no deben tomarse por borradas. *)
+let is_identifier k =
+  k <> "" && not ('0' <= k.[0] && k.[0] <= '9')
+  && String.for_all (fun c ->
+       c = '_' || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
+       || ('0' <= c && c <= '9')) k
+
+(* Aplica al proceso ocash el cwd y las variables que dejó bash. Las
+   variables exportadas antes de la llamada que ya no aparecen se
+   consideran `unset`. OCaml no expone unsetenv: se dejan vacías. *)
+let apply_state env ~before dump =
+  match String.split_on_char '\000' dump with
+  | [] | [_] -> ()
+  | pwd :: entries ->
+      (if pwd <> "" && pwd <> (try Sys.getcwd () with Sys_error _ -> "") then
+         try Unix.chdir pwd with Unix.Unix_error _ -> ());
+      let after = Hashtbl.create 64 in
+      List.iter (fun kv ->
+        match String.index_opt kv '=' with
+        | None -> ()
+        | Some i ->
+            let k = String.sub kv 0 i in
+            let v = String.sub kv (i + 1) (String.length kv - i - 1) in
+            if not (List.mem k ignored_vars) then begin
+              Hashtbl.replace after k ();
+              if Hashtbl.find_opt env k <> Some v then begin
+                Hashtbl.replace env k v;
+                (try Unix.putenv k v with _ -> ())
+              end
+            end
+      ) entries;
+      List.iter (fun k ->
+        if not (Hashtbl.mem after k) && not (List.mem k ignored_vars)
+           && is_identifier k && Hashtbl.mem env k then begin
+          Hashtbl.remove env k;
+          (try Unix.putenv k "" with _ -> ())
+        end
+      ) before
+
+let env_keys () =
+  Array.to_list (Unix.environment ())
+  |> List.filter_map (fun kv ->
+       match String.index_opt kv '=' with
+       | Some i -> Some (String.sub kv 0 i)
+       | None -> None)
+
+let contains_dollar_question s =
+  let re = Str.regexp_string "$?" in
+  try ignore (Str.search_forward re s 0); true with Not_found -> false
+
 (* Ejecuta el input vía `bash -c`. Hereda env del padre (incluido lo
-   que se haya exportado con `export`). *)
-let run input =
-  let cmd = ("bash", [| "bash"; "-c"; input |]) in
-  let* status = Lwt_process.exec cmd in
-  match status with
-  | Unix.WEXITED n   -> Lwt.return n
-  | Unix.WSIGNALED _ -> Lwt.return 130
-  | Unix.WSTOPPED _  -> Lwt.return 128
+   que se haya exportado con `export`). Con ~env, además sincroniza de
+   vuelta el cwd y las variables exportadas, para que `cd ~/x`,
+   `export P=$(...)` o `source venv/bin/activate` tengan efecto en ocash.
+   ~last_status permite que `$?` en bash vea el exit del comando previo. *)
+let run ?env ?(last_status = 0) input =
+  let input =
+    if last_status <> 0 && contains_dollar_question input
+    then Printf.sprintf "(exit %d); %s" last_status input
+    else input
+  in
+  match env with
+  | None ->
+      let* status = Lwt_process.exec ("bash", [| "bash"; "-c"; input |]) in
+      Lwt.return (Exit_status.of_status status)
+  | Some env ->
+      let state_file = Filename.temp_file "ocash" ".state" in
+      let before = env_keys () in
+      let script = dump_trap state_file ^ "; " ^ input in
+      Lwt.finalize
+        (fun () ->
+          let* status = Lwt_process.exec ("bash", [| "bash"; "-c"; script |]) in
+          (match read_file state_file with
+           | Some dump -> apply_state env ~before dump
+           | None -> ());
+          Lwt.return (Exit_status.of_status status))
+        (fun () ->
+          (try Sys.remove state_file with Sys_error _ -> ());
+          Lwt.return ())
 
 (* Sincroniza las variables locales (no exportadas) al environment
    antes del fallback, para que `bash -c` las vea. Útil cuando el

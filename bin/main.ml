@@ -30,7 +30,7 @@ let last_stderr = ref ""
 
 (* Self-correction: si el último comando falló (exit != 0) y AI está
    activa, ofrece al usuario que el AI proponga una corrección. *)
-let maybe_self_correct env =
+let maybe_self_correct ~eval_line =
   let open Ocash_lib in
   if !last_exit = 0 || !last_line = "" || not !Ai.ai_enabled then Lwt.return ()
   else if not (Lazy.force Readline.is_tty) then Lwt.return ()
@@ -53,22 +53,58 @@ let maybe_self_correct env =
                       with End_of_file -> "n" in
              (match go with
               | "" | "s" | "y" | "yes" | "si" | "sí" ->
-                  let* _ = Eval.eval_statement env
-                    (match Parser.parse cmd with Ok s -> s | _ -> Ast.Empty) in
+                  (* eval_line y no Parser.parse: la corrección puede usar
+                     &&, $(...) u otras construcciones que van a bash. *)
+                  let* _ = eval_line cmd in
                   Lwt.return ()
               | _ -> Lwt.return ())
          | _ -> Lwt.return ())
     | _ -> Lwt.return ()
   end
 
+let set_exit code =
+  last_exit := code;
+  Ocash_lib.Eval.last_exit_code := code
+
+let run_bash env line =
+  Ocash_lib.Bash.sync_env env;
+  Ocash_lib.Bash.run ~env ~last_status:!Ocash_lib.Eval.last_exit_code line
+
+let eval_line_untimed env line =
+  (* Alias de la primera palabra: bash no conoce nuestros aliases, así
+     que si la línea va a bash (o el alias tiene pipes/operadores) lo
+     expandimos textualmente antes. *)
+  let line =
+    let force = Ocash_lib.Bash.needs_bash line in
+    match Ocash_lib.Eval.expand_alias_text ~force line with
+    | Some l -> l
+    | None -> line
+  in
+  (* Fallback a bash si el input usa construcciones que ocash no parsea
+     nativamente (if/for/$()/&&/;/[[ ]]/heredocs/glob/tilde/...). *)
+  if Ocash_lib.Bash.needs_bash line then
+    Lwt.catch
+      (fun () -> run_bash env line)
+      (fun exn ->
+        Printf.eprintf "\027[31mbash error:\027[0m %s\n%!" (Printexc.to_string exn);
+        Lwt.return 1)
+  else
+    match Ocash_lib.Parser.parse line with
+    | Error _ ->
+        (* Si el parser nativo falla, cae a bash como último recurso. *)
+        run_bash env line
+    | Ok stmt ->
+        Lwt.catch
+          (fun () -> Ocash_lib.Eval.eval_statement env stmt)
+          (fun exn ->
+            Printf.eprintf "\027[31merror:\027[0m %s\n%!" (Printexc.to_string exn);
+            Lwt.return 1)
+
 (* Wrapper de `time cmd ...`: mide y reporta wall/user/sys. *)
 let eval_line_timed env line =
   let t0 = Unix.gettimeofday () in
   let tms0 = Unix.times () in
-  let* code = match Ocash_lib.Parser.parse line with
-    | Ok s -> Ocash_lib.Eval.eval_statement env s
-    | Error _ -> Lwt.return 1
-  in
+  let* code = eval_line_untimed env line in
   let t1 = Unix.gettimeofday () in
   let tms1 = Unix.times () in
   Printf.eprintf "\nreal\t%.3fs\nuser\t%.3fs\nsys\t%.3fs\n%!"
@@ -80,35 +116,14 @@ let eval_line_timed env line =
 let eval_line env line =
   last_line := line;
   add_history line;
-  (* Prefijo `time `: medir el resto del pipeline *)
-  if String.length line > 5 && String.sub line 0 5 = "time " then
-    eval_line_timed env (String.sub line 5 (String.length line - 5))
-  else
-  (* Fallback a bash si el input usa construcciones que ocash no parsea
-     nativamente (if/for/$()/&&/;/[[ ]]/heredocs/glob/tilde/...). *)
-  if Ocash_lib.Bash.needs_bash line then begin
-    Ocash_lib.Bash.sync_env env;
-    Lwt.catch
-      (fun () -> Ocash_lib.Bash.run line)
-      (fun exn ->
-        Printf.eprintf "\027[31mbash error:\027[0m %s\n%!" (Printexc.to_string exn);
-        Lwt.return 1)
-  end else
-    match Ocash_lib.Parser.parse line with
-    | Error _ ->
-        (* Si el parser nativo falla, cae a bash como último recurso. *)
-        Ocash_lib.Bash.sync_env env;
-        Ocash_lib.Bash.run line
-    | Ok stmt ->
-        Lwt.catch
-          (fun () ->
-            let* code = Ocash_lib.Eval.eval_statement env stmt in
-            last_exit := code;
-            Lwt.return code)
-          (fun exn ->
-            Printf.eprintf "\027[31merror:\027[0m %s\n%!" (Printexc.to_string exn);
-            last_exit := 1;
-            Lwt.return 1)
+  let* code =
+    (* Prefijo `time `: medir el resto del pipeline *)
+    if String.length line > 5 && String.sub line 0 5 = "time " then
+      eval_line_timed env (String.sub line 5 (String.length line - 5))
+    else eval_line_untimed env line
+  in
+  set_exit code;
+  Lwt.return code
 
 let last_history_entries n = Ocash_lib.History.last_n n
 
@@ -277,19 +292,22 @@ let () =
     Ocash_lib.History.load ();
     if interactive then banner ();
     let env = Ocash_lib.Eval.create_env () in
+    Ocash_lib.Eval.source_line_ref := Some (eval_line_untimed env);
     let* () = Ocash_lib.Ai.init () in
     (* Cargar ~/.ocashrc si existe *)
     let rc = Filename.concat
       (try Sys.getenv "HOME" with Not_found -> "/tmp") ".ocashrc" in
     let* () =
       if Sys.file_exists rc then
-        let stmt = match Ocash_lib.Parser.parse (Printf.sprintf "source %s" rc) with
+        let stmt = match Ocash_lib.Parser.parse
+                           (Printf.sprintf "source %s" (Filename.quote rc)) with
           | Ok s -> s | Error _ -> Ocash_lib.Ast.Empty in
         let* _ = Ocash_lib.Eval.eval_statement env stmt in
         Lwt.return ()
       else Lwt.return ()
     in
     let rec loop () =
+      Ocash_lib.Eval.notify_done_jobs ();
       let history_ctx = last_history_entries 8 in
       let* input_opt = Ocash_lib.Readline.read_input ~history:history_ctx () in
       match input_opt with
@@ -327,7 +345,7 @@ let () =
             end
             else begin
               let* _ = eval_line env line in
-              maybe_self_correct env
+              maybe_self_correct ~eval_line:(eval_line env)
             end
           in
           loop ()

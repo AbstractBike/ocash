@@ -325,6 +325,176 @@ let rag_tests = [
   Alcotest.test_case "empty"              `Quick test_rag_empty;
 ]
 
+
+(* ============================================================ *)
+(* Quoting y expansión                                          *)
+(* ============================================================ *)
+
+let words line =
+  match parse_ok line with
+  | Ast.Exec (Ast.Single { argv; _ }) ->
+      let env = Hashtbl.create 4 in
+      Hashtbl.replace env "X" "val";
+      List.map (Eval.expand_word env) argv
+  | _ -> Alcotest.failf "expected Single for %S" line
+
+let qw line expected () =
+  Alcotest.(check (list string)) line expected (words line)
+
+let test_expand_status () =
+  let env = Hashtbl.create 1 in
+  Eval.last_exit_code := 3;
+  let r = Eval.expand_word env "rc=$?" in
+  Eval.last_exit_code := 0;
+  Alcotest.(check string) "$?" "rc=3" r
+
+let quoting_tests = [
+  Alcotest.test_case "single quotes literal" `Quick
+    (qw "echo '$X'" ["echo"; "$X"]);
+  Alcotest.test_case "double quotes expand" `Quick
+    (qw "echo \"a $X b\"" ["echo"; "a val b"]);
+  Alcotest.test_case "braced var" `Quick
+    (qw "echo ${X}y" ["echo"; "valy"]);
+  Alcotest.test_case "escaped dollar" `Quick
+    (qw "echo \\$X" ["echo"; "$X"]);
+  Alcotest.test_case "lone dollar kept" `Quick
+    (qw "sed 's/$/x/' $ a$" ["sed"; "s/$/x/"; "$"; "a$"]);
+  Alcotest.test_case "dq keeps other backslash" `Quick
+    (qw "printf \"a\\nb\"" ["printf"; "a\\nb"]);
+  Alcotest.test_case "dq escaped quote" `Quick
+    (qw "echo \"say \\\"hi\\\"\"" ["echo"; "say \"hi\""]);
+  Alcotest.test_case "sq backslash literal" `Quick
+    (qw "echo 'a\\b'" ["echo"; "a\\b"]);
+  Alcotest.test_case "escaped space" `Quick
+    (qw "ls my\\ file" ["ls"; "my file"]);
+  Alcotest.test_case "$? expands" `Quick test_expand_status;
+]
+
+(* ============================================================ *)
+(* Eval: builtins, aliases, redirects, exit codes               *)
+(* ============================================================ *)
+
+let test_alias_builtin_in_process () =
+  let env = Eval.create_env () in
+  let orig = Sys.getcwd () in
+  let _ = run_line env "alias goroot='cd /'" in
+  let _ = run_line env "goroot" in
+  let after = Sys.getcwd () in
+  Unix.chdir orig;
+  Hashtbl.remove Eval.aliases "goroot";
+  Alcotest.(check string) "alias a cd cambia cwd" "/" after
+
+let test_cd_dash () =
+  let env = Eval.create_env () in
+  let orig = Sys.getcwd () in
+  let _ = run_line env "cd /" in
+  let _ = run_line env (Printf.sprintf "cd %s" (Filename.quote orig)) in
+  with_tmp_file (fun out ->
+    let _ = run_line env (Printf.sprintf "cd - > %s" out) in
+    let after = Sys.getcwd () in
+    Unix.chdir orig;
+    Alcotest.(check string) "cd - vuelve a OLDPWD" "/" after;
+    Alcotest.(check string) "cd - imprime destino" "/\n" (read_file out))
+
+let test_redirect_missing_file () =
+  let env = Eval.create_env () in
+  let code = run_line env "cat < /nonexistent/ocash_missing" in
+  Alcotest.(check int) "exit 1, sin excepción" 1 code
+
+let test_builtin_redirect_missing_dir () =
+  let env = Eval.create_env () in
+  let code = run_line env "echo x > /nonexistent/dir/f" in
+  Alcotest.(check int) "exit 1, sin excepción" 1 code
+
+let test_redirect_target_expands () =
+  with_tmp_file (fun out ->
+    let env = Eval.create_env () in
+    Hashtbl.replace env "OUT" out;
+    let _ = run_line env "echo ok > $OUT" in
+    Alcotest.(check string) "escribe en $OUT" "ok\n" (read_file out))
+
+let test_exit_code_tracked () =
+  let env = Eval.create_env () in
+  let _ = run_line env "false" in
+  with_tmp_file (fun out ->
+    let _ = run_line env (Printf.sprintf "echo $? > %s" out) in
+    Alcotest.(check string) "$? tras false" "1\n" (read_file out))
+
+let test_signal_exit_code () =
+  let env = Eval.create_env () in
+  let code = run_line env "sh -c 'kill -9 $$'" in
+  Alcotest.(check int) "128 + SIGKILL" 137 code
+
+let test_echo_n () =
+  with_tmp_file (fun out ->
+    let env = Eval.create_env () in
+    let _ = run_line env (Printf.sprintf "echo -n abc > %s" out) in
+    Alcotest.(check string) "sin newline" "abc" (read_file out))
+
+let test_unset () =
+  let env = Eval.create_env () in
+  let _ = run_line env "OCASH_T=1" in
+  let _ = run_line env "unset OCASH_T" in
+  Alcotest.(check bool) "eliminada" false (Hashtbl.mem env "OCASH_T")
+
+let test_background_missing_cmd () =
+  let env = Eval.create_env () in
+  let before = List.length !Eval.jobs in
+  let code = run_line env "ocash_no_such_cmd &" in
+  Alcotest.(check int) "exit 127" 127 code;
+  Alcotest.(check int) "sin job fantasma" before (List.length !Eval.jobs)
+
+let eval_more_tests = [
+  Alcotest.test_case "alias → builtin"      `Quick test_alias_builtin_in_process;
+  Alcotest.test_case "cd -"                 `Quick test_cd_dash;
+  Alcotest.test_case "< missing file"       `Quick test_redirect_missing_file;
+  Alcotest.test_case "builtin > bad dir"    `Quick test_builtin_redirect_missing_dir;
+  Alcotest.test_case "redirect $VAR"        `Quick test_redirect_target_expands;
+  Alcotest.test_case "$? tracked"           `Quick test_exit_code_tracked;
+  Alcotest.test_case "signal exit code"     `Quick test_signal_exit_code;
+  Alcotest.test_case "echo -n"              `Quick test_echo_n;
+  Alcotest.test_case "unset"                `Quick test_unset;
+  Alcotest.test_case "bg missing cmd"       `Quick test_background_missing_cmd;
+]
+
+(* ============================================================ *)
+(* Bash fallback: sincronización de estado de vuelta            *)
+(* ============================================================ *)
+
+let test_bash_syncs_cwd () =
+  let env = Eval.create_env () in
+  let orig = Sys.getcwd () in
+  let code = Lwt_main.run (Bash.run ~env "cd / && true") in
+  let after = Sys.getcwd () in
+  Unix.chdir orig;
+  Alcotest.(check int) "exit 0" 0 code;
+  Alcotest.(check string) "cwd sincronizado" "/" after
+
+let test_bash_syncs_export () =
+  let env = Eval.create_env () in
+  let _ = Lwt_main.run (Bash.run ~env "export OCASH_SYNC=$(echo hola)") in
+  Alcotest.(check (option string)) "var exportada vuelve"
+    (Some "hola") (Hashtbl.find_opt env "OCASH_SYNC");
+  Alcotest.(check string) "en el environment" "hola" (Sys.getenv "OCASH_SYNC")
+
+let test_bash_preserves_exit () =
+  let env = Eval.create_env () in
+  let code = Lwt_main.run (Bash.run ~env "exit 7") in
+  Alcotest.(check int) "exit 7 a través del trap" 7 code
+
+let test_bash_last_status () =
+  let code = Lwt_main.run (Bash.run ~last_status:5 "exit $?") in
+  Alcotest.(check int) "$? del comando previo" 5 code
+
+let bash_sync_tests = [
+  Alcotest.test_case "cd vuelve"         `Quick test_bash_syncs_cwd;
+  Alcotest.test_case "export vuelve"     `Quick test_bash_syncs_export;
+  Alcotest.test_case "exit preservado"   `Quick test_bash_preserves_exit;
+  Alcotest.test_case "$? previo"         `Quick test_bash_last_status;
+  nb "echo $?" false;
+  nb "ls ?.ml" true;
+]
+
 (* ============================================================ *)
 (* Runner                                                        *)
 (* ============================================================ *)
@@ -332,8 +502,10 @@ let rag_tests = [
 let () =
   Alcotest.run "ocash" [
     "parser",       parser_tests;
-    "eval",         eval_tests;
+    "quoting",      quoting_tests;
+    "eval",         eval_tests @ eval_more_tests;
     "bash",         bash_tests;
+    "bash-sync",    bash_sync_tests;
     "history",      history_tests;
     "ai",           ai_tests;
     "autocomplete", autocomplete_tests;

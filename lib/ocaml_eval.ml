@@ -125,10 +125,7 @@ let compile_native ?(packages=[]) ?(output=None) src =
       Printf.printf "ocash[ocaml]: %s\n%!" (String.concat " " cmd_parts);
       let cmd = (prog, Array.of_list cmd_parts) in
       let* status = Lwt_process.exec cmd in
-      match status with
-      | Unix.WEXITED n   -> Lwt.return n
-      | Unix.WSIGNALED _ -> Lwt.return 130
-      | Unix.WSTOPPED _  -> Lwt.return 128
+      Lwt.return (Exit_status.of_status status)
 
 let print_help () =
   print_endline {|ocaml — compilador OCaml embebido en ocash
@@ -174,6 +171,11 @@ let dispatch args =
         | None   -> []
       in
       compile_native ~packages ~output:out file
+  | other when cli_available "ocaml" ->
+      (* `ocaml script.ml`, `ocaml -version`...: al binario real. *)
+      let* status =
+        Lwt_process.exec ("ocaml", Array.of_list ("ocaml" :: other)) in
+      Lwt.return (Exit_status.of_status status)
   | other ->
       Printf.eprintf "ocash[ocaml]: subcomando desconocido: %s\n%!"
         (String.concat " " other);

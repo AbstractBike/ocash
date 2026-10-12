@@ -71,15 +71,27 @@ let git_info () =
     end
   with _ -> None
 
+(* Abrevia $HOME a `~` solo en límite de componente: con HOME=/home/user,
+   /home/username se queda tal cual. HOME vacío o "/" no abrevia. *)
+let abbrev_home ~home path =
+  let home =
+    if String.length home > 1 && home.[String.length home - 1] = '/'
+    then String.sub home 0 (String.length home - 1) else home
+  in
+  let hl = String.length home in
+  if hl <= 1 then path
+  else if path = home then "~"
+  else if String.length path > hl && String.starts_with ~prefix:home path
+          && path.[hl] = '/'
+  then "~" ^ String.sub path hl (String.length path - hl)
+  else path
+
 let build_prompt () =
   let user = Option.value ~default:"user" (Sys.getenv_opt "USER") in
   let cwd  =
     let full = try Unix.getcwd () with _ -> "/" in
     let home = Option.value ~default:"" (Sys.getenv_opt "HOME") in
-    if String.starts_with ~prefix:home full then
-      "~" ^ String.sub full (String.length home)
-              (String.length full - String.length home)
-    else full
+    abbrev_home ~home full
   in
   let count =
     try Array.length (Sys.readdir ".") with _ -> 0
@@ -110,7 +122,7 @@ exception Trigger_hsearch of string
 
 (* Ghost-text inline: sugerencia AI mostrada en gris detrás del cursor,
    actualizada en cada cambio de input. Tab inserta la sugerencia. *)
-class shell_readline ?(history_ctx=[]) ?(prefill="") term completions prompt_str =
+class shell_readline ?(history_ctx=[]) ?(prefill="") term prompt_str =
   let suggestion = ref "" in
   let last_query_text = ref "" in
   object(self)
@@ -189,8 +201,42 @@ class shell_readline ?(history_ctx=[]) ?(prefill="") term completions prompt_str
         (Array.append styled ghost_dim, cursor)
       end
 
-    (* Tab inserta la sugerencia si hay una; si no, hace completion
-       normal (paths, builtins). *)
+    (* Calcula los candidatos para la palabra bajo el cursor. En
+       lambda-term, set_completion rellena la lista y `super#complete` es
+       quien inserta; antes solo se rellenaba la lista y Tab no hacía nada.
+       No sobrescribimos `completion` porque lambda-term la invoca en cada
+       pulsación y esto lee todos los directorios del PATH. *)
+    method private tab_completion =
+      let before_cursor =
+        Zed_rope.to_string self#input_prev |> Zed_string.to_utf8
+      in
+      let last_word =
+        match String.rindex_opt before_cursor ' ' with
+        | Some i -> String.sub before_cursor (i + 1)
+                      (String.length before_cursor - i - 1)
+        | None -> before_cursor
+      in
+      let before =
+        String.sub before_cursor 0
+          (String.length before_cursor - String.length last_word)
+      in
+      let command = Completion.is_command_position before in
+      let local =
+        Completion.complete_word ~command last_word
+        |> List.map (fun s ->
+            (* Tras un directorio no añadimos espacio: se sigue
+               completando dentro. *)
+            let suffix =
+              if String.length s > 0 && s.[String.length s - 1] = '/'
+              then "" else " "
+            in
+            (Zed_string.of_utf8 s, Zed_string.of_utf8 suffix))
+      in
+      (* set_completion espera posición en caracteres, no en bytes. *)
+      self#set_completion (Zed_utf8.length before) local
+
+    (* Tab inserta la sugerencia ghost si hay una; si no, completion
+       normal (paths, builtins, comandos del PATH). *)
     method! complete =
       if !suggestion <> "" then begin
         let sugg = !suggestion in
@@ -198,21 +244,8 @@ class shell_readline ?(history_ctx=[]) ?(prefill="") term completions prompt_str
         let zs = Zed_rope.of_string (Zed_string.of_utf8 sugg) in
         Zed_edit.insert self#context zs
       end else begin
-        let full_input =
-          Zed_rope.to_string (Zed_edit.text self#edit) |> Zed_string.to_utf8
-        in
-        let last_word =
-          full_input
-          |> String.split_on_char ' '
-          |> List.rev
-          |> (function [] -> "" | h :: _ -> h)
-        in
-        let local =
-          List.filter (String.starts_with ~prefix:last_word) completions
-          |> List.map (fun s ->
-              (Zed_string.of_utf8 s, Zed_string.of_utf8 ""))
-        in
-        self#set_completion (String.length full_input - String.length last_word) local
+        self#tab_completion;
+        super#complete
       end
 
   end
@@ -376,14 +409,13 @@ let read_input ?(history=[]) () =
   if not (Lazy.force is_tty) then
     read_input_dumb ~with_prompt:false ()
   else
-    let completions = Completion.get_all "" in
     let prompt      = build_prompt () in
     let rec attempt ?(prefill="") () =
       Lwt.catch
         (fun () ->
           let* term = Lazy.force LTerm.stdout in
           let rl = new shell_readline ~history_ctx:history ~prefill
-                     term completions prompt in
+                     term prompt in
           let* result = rl#run in
           Lwt.return_some (Zed_string.to_utf8 result))
         (function

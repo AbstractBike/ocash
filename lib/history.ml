@@ -126,12 +126,16 @@ let fuzzy_search ?(limit=20) query =
     let s = fuzzy_score query e in
     if s >= 0 then Some (s, e) else None
   ) (List.rev !entries) in
+  (* List.sort es estable: a igual score gana la entrada más reciente. *)
   let sorted = List.sort (fun (a, _) (b, _) -> compare b a) scored in
+  (* Deduplica conservando el orden por score (la primera aparición es la
+     mejor) y solo después corta a `limit`. *)
+  let seen = Hashtbl.create 64 in
   let rec take n lst =
     if n <= 0 then []
     else match lst with
       | [] -> []
-      | (_, e) :: tl -> e :: take (n - 1) tl
+      | (_, e) :: tl when Hashtbl.mem seen e -> take n tl
+      | (_, e) :: tl -> Hashtbl.add seen e (); e :: take (n - 1) tl
   in
   take limit sorted
-  |> List.sort_uniq String.compare

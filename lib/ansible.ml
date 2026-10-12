@@ -29,10 +29,7 @@ let run_proc prog args =
   end else begin
     let cmd = (prog, Array.of_list (prog :: args)) in
     let* status = Lwt_process.exec cmd in
-    match status with
-    | Unix.WEXITED n   -> Lwt.return n
-    | Unix.WSIGNALED _ -> Lwt.return 130
-    | Unix.WSTOPPED _  -> Lwt.return 128
+    Lwt.return (Exit_status.of_status status)
   end
 
 let with_inventory ?inventory args =
@@ -140,6 +137,10 @@ let dispatch args =
   | ["hosts"; pattern] -> list_hosts pattern
   | ["hosts"] -> list_hosts "all"
   | ["inventory"] -> list_inventory ()
+  | other when cli_available "ansible" ->
+      (* Sintaxis del CLI real (`ansible all -m ping`, `--version`...):
+         el builtin no debe tapar al binario. *)
+      run_proc "ansible" other
   | other ->
       Printf.eprintf "%socash[ansible]:%s subcomando desconocido: %s\n%!"
         c_red c_reset (String.concat " " other);

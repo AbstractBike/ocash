@@ -1,7 +1,7 @@
 # ocash — interactive OCaml shell with AI, Ansible & a JIT unikernel
 
 [![OCaml](https://img.shields.io/badge/OCaml-%E2%89%A5%204.14-orange.svg)](#building-from-source)
-[![Tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-90%20passing-brightgreen.svg)](#testing)
 
 `ocash` is a Unix shell written in OCaml that aims to be a drop-in interactive
 replacement for `bash`: it parses pipes, redirects, assignments and a wide set
@@ -115,6 +115,9 @@ user [AI] ~/ocash (main*) {14} $ <Ctrl-R>git
 ### Autocomplete (ghost text + Ctrl-R)
 
 - Fish-style inline ghost text in dim grey behind the cursor: `Tab` accepts
+- Without a suggestion, `Tab` completes commands (builtins, aliases, `PATH`)
+  in command position and file paths elsewhere (subdirectories, `~/`,
+  trailing `/` on directories, dotfiles only after a leading `.`)
 - Suggestion source: history-prefix match first (instant, offline); falls
   back to the AI backend if no history match and a GPU is detected (or the
   backend is a fast remote one)
@@ -307,9 +310,9 @@ Requires `ocaml >= 4.14`, `dune >= 3.12`, plus `lwt`, `lambda-term`,
 
 ## Testing
 
-The test suite is built with `alcotest` and covers 74 cases across 9
+The test suite is built with `alcotest` and covers 90 cases across 13
 groups (parser, quoting/expansion, eval, bash classifier, bash state sync,
-history fuzzy scoring, AI markdown stripping, autocomplete prefix logic, RAG
+history fuzzy scoring and search, prompt, completion, builtin delegation, AI markdown stripping, autocomplete prefix logic, RAG
 tokenizer):
 
 ```bash

@@ -495,6 +495,148 @@ let bash_sync_tests = [
   nb "ls ?.ml" true;
 ]
 
+
+(* ============================================================ *)
+(* History fuzzy_search: orden por score, dedup, limit          *)
+(* ============================================================ *)
+
+let with_history entries f =
+  let saved = !History.entries in
+  History.entries := entries;
+  Fun.protect ~finally:(fun () -> History.entries := saved) f
+
+let test_fuzzy_search_score_order () =
+  with_history ["git log"; "a git"] (fun () ->
+    Alcotest.(check (list string)) "mejor score primero, no alfabético"
+      ["git log"; "a git"] (History.fuzzy_search "git"))
+
+let test_fuzzy_search_dedup_then_limit () =
+  with_history ["git"; "x"; "git"; "gitk"] (fun () ->
+    Alcotest.(check (list string)) "sin duplicados y limit tras dedup"
+      ["gitk"; "git"] (History.fuzzy_search ~limit:2 "git"))
+
+let fuzzy_search_tests = [
+  Alcotest.test_case "orden por score"  `Quick test_fuzzy_search_score_order;
+  Alcotest.test_case "dedup + limit"    `Quick test_fuzzy_search_dedup_then_limit;
+]
+
+(* ============================================================ *)
+(* Prompt: abreviatura de $HOME                                 *)
+(* ============================================================ *)
+
+let ah home path expected =
+  Alcotest.test_case (Printf.sprintf "%s in %s" path home) `Quick (fun () ->
+    Alcotest.(check string) path expected (Readline.abbrev_home ~home path))
+
+let prompt_tests = [
+  ah "/home/user" "/home/user" "~";
+  ah "/home/user" "/home/user/src" "~/src";
+  ah "/home/user" "/home/username" "/home/username";
+  ah "/home/user/" "/home/user/x" "~/x";
+  ah "" "/etc" "/etc";
+  ah "/" "/etc" "/etc";
+]
+
+(* ============================================================ *)
+(* Completion                                                   *)
+(* ============================================================ *)
+
+let with_tmp_tree f =
+  let root = Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "ocash_compl_%d" (Unix.getpid ())) in
+  let mk p = Unix.mkdir (Filename.concat root p) 0o755 in
+  let touch p = close_out (open_out (Filename.concat root p)) in
+  Unix.mkdir root 0o755; mk "src"; touch "src/foo.ml"; touch "src/fob.ml";
+  touch ".hidden"; touch "readme";
+  let orig = Sys.getcwd () in
+  Unix.chdir root;
+  Fun.protect
+    ~finally:(fun () ->
+      Unix.chdir orig;
+      ignore (Sys.command ("rm -rf " ^ Filename.quote root)))
+    f
+
+let test_complete_subdir () =
+  with_tmp_tree (fun () ->
+    Alcotest.(check (list string)) "src/fo"
+      ["src/fob.ml"; "src/foo.ml"]
+      (Completion.complete_word ~command:false "src/fo"))
+
+let test_complete_dir_slash () =
+  with_tmp_tree (fun () ->
+    Alcotest.(check (list string)) "directorio con /"
+      ["src/"] (Completion.complete_word ~command:false "sr"))
+
+let test_complete_hidden () =
+  with_tmp_tree (fun () ->
+    Alcotest.(check (list string)) "ocultos ocultos"
+      ["readme"; "src/"] (Completion.complete_word ~command:false "");
+    Alcotest.(check (list string)) "con prefijo ."
+      [".hidden"] (Completion.complete_word ~command:false ".h"))
+
+let test_complete_command_builtin () =
+  Alcotest.(check bool) "builtin en posición de comando" true
+    (List.mem "hsearch" (Completion.complete_word ~command:true "hse"))
+
+let test_command_position () =
+  Alcotest.(check bool) "inicio" true (Completion.is_command_position "");
+  Alcotest.(check bool) "tras |" true (Completion.is_command_position "ls | ");
+  Alcotest.(check bool) "argumento" false (Completion.is_command_position "ls ")
+
+let completion_tests = [
+  Alcotest.test_case "subdirectorio"     `Quick test_complete_subdir;
+  Alcotest.test_case "dir con /"         `Quick test_complete_dir_slash;
+  Alcotest.test_case "ficheros ocultos"  `Quick test_complete_hidden;
+  Alcotest.test_case "builtins"          `Quick test_complete_command_builtin;
+  Alcotest.test_case "posición comando"  `Quick test_command_position;
+]
+
+(* ============================================================ *)
+(* Builtins ansible/ocaml delegan en el binario real            *)
+(* ============================================================ *)
+
+let with_fake_bin name code f =
+  let dir = Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "ocash_bin_%d" (Unix.getpid ())) in
+  (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  let path = Filename.concat dir name in
+  let oc = open_out path in
+  Printf.fprintf oc "#!/bin/sh\nexit %d\n" code;
+  close_out oc;
+  Unix.chmod path 0o755;
+  let old_path = Sys.getenv "PATH" in
+  Unix.putenv "PATH" (dir ^ ":" ^ old_path);
+  Fun.protect
+    ~finally:(fun () ->
+      Unix.putenv "PATH" old_path;
+      ignore (Sys.command ("rm -rf " ^ Filename.quote dir)))
+    f
+
+let test_ansible_delegates () =
+  with_fake_bin "ansible" 42 (fun () ->
+    Alcotest.(check int) "ansible all -m ping → binario real" 42
+      (Lwt_main.run (Ansible.dispatch ["all"; "-m"; "ping"])))
+
+let test_ocaml_delegates () =
+  with_fake_bin "ocaml" 43 (fun () ->
+    Alcotest.(check int) "ocaml script.ml → binario real" 43
+      (Lwt_main.run (Ocaml_eval.dispatch ["script.ml"])))
+
+let delegate_tests = [
+  Alcotest.test_case "ansible"  `Quick test_ansible_delegates;
+  Alcotest.test_case "ocaml"    `Quick test_ocaml_delegates;
+]
+
+(* ============================================================ *)
+(* Autocomplete: rtrim conserva el espacio inicial              *)
+(* ============================================================ *)
+
+let autocomplete_trim_tests = [
+  Alcotest.test_case "rtrim" `Quick (fun () ->
+    Alcotest.(check string) "espacio inicial" " status"
+      (Autocomplete.rtrim " status \n"));
+]
+
 (* ============================================================ *)
 (* Runner                                                        *)
 (* ============================================================ *)
@@ -506,8 +648,11 @@ let () =
     "eval",         eval_tests @ eval_more_tests;
     "bash",         bash_tests;
     "bash-sync",    bash_sync_tests;
-    "history",      history_tests;
+    "history",      history_tests @ fuzzy_search_tests;
+    "prompt",       prompt_tests;
+    "completion",   completion_tests;
+    "delegate",     delegate_tests;
     "ai",           ai_tests;
-    "autocomplete", autocomplete_tests;
+    "autocomplete", autocomplete_tests @ autocomplete_trim_tests;
     "rag",          rag_tests;
   ]

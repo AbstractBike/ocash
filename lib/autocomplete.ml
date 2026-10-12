@@ -36,6 +36,13 @@ let build_completion_query ~history ~current =
     "Recent history:\n%s\n\nCurrent partial input: %s\nCompletion:"
     hist current
 
+let rtrim s =
+  let n = ref (String.length s) in
+  while !n > 0 && (match s.[!n - 1] with ' ' | '\t' | '\n' | '\r' -> true | _ -> false) do
+    decr n
+  done;
+  String.sub s 0 !n
+
 (* Cache simple en memoria para evitar pedir lo mismo dos veces *)
 let cache : (string, string) Hashtbl.t = Hashtbl.create 256
 
@@ -69,7 +76,9 @@ let suggest ~history ~current =
                            (String.length s - String.length current)
                     else s
                   in
-                  let suggestion = String.trim suggestion in
+                  (* Solo recortamos por la derecha: el espacio inicial
+                     de " status" tras "git" es parte de la sugerencia. *)
+                  let suggestion = rtrim suggestion in
                   if suggestion = "" then Lwt.return None
                   else begin
                     Hashtbl.replace cache key suggestion;

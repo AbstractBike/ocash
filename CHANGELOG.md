@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (interactive)
+- Tab completion never inserted anything: ocash overrode lambda-term's
+  `complete` (which performs the insertion) with code that only filled the
+  hidden candidate list. It now completes commands (builtins, aliases, PATH)
+  in command position and paths elsewhere, including subdirectories
+  (`src/fo`), `~/`, a trailing `/` on directories, and hides dotfiles unless
+  the prefix starts with `.`. PATH is no longer scanned on every prompt.
+- Ctrl-R picker / `hsearch` results were sorted alphabetically instead of by
+  match score, and de-duplication ran after truncation (fewer results than
+  the limit).
+- AI ghost-text dropped the leading space of a suggestion (`git` +
+  ` status` became `gitstatus`).
+- Prompt `~` abbreviation matched partial path components
+  (`/home/username` with `HOME=/home/user` showed `~name`) and an empty
+  `HOME` turned every path into `~...`.
+- `ansible` and `ocaml` builtins shadowed the real CLIs: unknown subcommands
+  (`ansible all -m ping`, `ocaml script.ml`, `ocaml -version`) are now passed
+  to the binary in PATH.
+
 ### Fixed
 - Single quotes now prevent variable expansion (`echo '$HOME'` printed the
   home directory); double quotes honour `\"`, `\$`, `\\`; unquoted `\c` is
